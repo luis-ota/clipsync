@@ -240,7 +240,9 @@ async fn main() {
             eprintln!("ListPeers requer estado do daemon; disponível em versão futura (v0.2)");
         }
         Some(Commands::Untrust { device }) => {
-            eprintln!("Untrust ({device}) requer estado do daemon; disponível em versão futura (v0.2)");
+            eprintln!(
+                "Untrust ({device}) requer estado do daemon; disponível em versão futura (v0.2)"
+            );
         }
         Some(Commands::ShowAddress) => cmd_show_address(),
         Some(Commands::ServiceInstall) => cmd_service_install(),

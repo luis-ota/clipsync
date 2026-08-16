@@ -7,8 +7,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use base64::Engine;
 use axum::extract::ws::{Message as WsMessage, WebSocket};
+use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -89,7 +89,6 @@ pub struct ConnectionInner {
 }
 
 impl ConnectionInner {
-
     async fn reader_loop<R>(&mut self, rx: &mut R, session: &mut PeerSession) -> Result<()>
     where
         R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
@@ -140,10 +139,7 @@ impl ConnectionInner {
     }
 
     /// Espera a primeira mensagem `hello`.
-    async fn await_hello<R>(
-        &mut self,
-        rx: &mut R,
-    ) -> Result<(DeviceInfo, Option<DeviceId>)>
+    async fn await_hello<R>(&mut self, rx: &mut R) -> Result<(DeviceInfo, Option<DeviceId>)>
     where
         R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
     {
@@ -164,9 +160,7 @@ impl ConnectionInner {
                         }
                         other => {
                             warn!(peer = %self.addr, msg = other.type_name(), "esperava hello, recebeu outra");
-                            return Err(Error::Protocol(
-                                "primeira mensagem deve ser hello".into(),
-                            ));
+                            return Err(Error::Protocol("primeira mensagem deve ser hello".into()));
                         }
                     }
                 }
@@ -174,7 +168,9 @@ impl ConnectionInner {
                     return Err(Error::Protocol("fechado antes do hello".into()))
                 }
                 WsMessage::Binary(_) => {
-                    return Err(Error::Protocol("esperava hello (texto), recebeu binário".into()))
+                    return Err(Error::Protocol(
+                        "esperava hello (texto), recebeu binário".into(),
+                    ))
                 }
                 WsMessage::Ping(_) | WsMessage::Pong(_) => {}
             }
@@ -213,12 +209,12 @@ impl ConnectionInner {
                         .map_err(|e| Error::Protocol(format!("JSON inválido: {e}")))?;
                     match msg {
                         Message::PairSubmit { code, nonce } => {
-                            let result = self
-                                .state
-                                .pairing
-                                .lock()
-                                .await
-                                .submit(&device_name, &nonce, &code);
+                            let result =
+                                self.state
+                                    .pairing
+                                    .lock()
+                                    .await
+                                    .submit(&device_name, &nonce, &code);
                             match result {
                                 Ok(id) => {
                                     info!(peer = %self.addr, device = %id, "pareamento concluído");
@@ -256,9 +252,7 @@ impl ConnectionInner {
                 WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Binary(_) => continue,
             }
         }
-        Err(Error::Protocol(
-            "conexão fechada durante pareamento".into(),
-        ))
+        Err(Error::Protocol("conexão fechada durante pareamento".into()))
     }
 
     /// Calcula capabilities do servidor com base na config e no device.
@@ -405,15 +399,13 @@ impl ConnectionInner {
 /// para o canal local.
 fn peer_snapshot(msg: &Message) -> crate::clipboard::ClipboardEvent {
     match msg {
-        Message::ClipboardText { content, .. } => {
-            crate::clipboard::ClipboardEvent::Changed(Box::new(
-                crate::clipboard::ClipboardSnapshot {
-                    mime: crate::clipboard::MIME_TEXT.to_owned(),
-                    bytes: content.as_bytes().to_vec(),
-                    sha256: sha_of(msg),
-                },
-            ))
-        }
+        Message::ClipboardText { content, .. } => crate::clipboard::ClipboardEvent::Changed(
+            Box::new(crate::clipboard::ClipboardSnapshot {
+                mime: crate::clipboard::MIME_TEXT.to_owned(),
+                bytes: content.as_bytes().to_vec(),
+                sha256: sha_of(msg),
+            }),
+        ),
         Message::ClipboardImage { data_b64, mime, .. } => {
             crate::clipboard::ClipboardEvent::Changed(Box::new(
                 crate::clipboard::ClipboardSnapshot {
@@ -425,15 +417,13 @@ fn peer_snapshot(msg: &Message) -> crate::clipboard::ClipboardEvent {
                 },
             ))
         }
-        Message::ClipboardHtml { html, .. } => {
-            crate::clipboard::ClipboardEvent::Changed(Box::new(
-                crate::clipboard::ClipboardSnapshot {
-                    mime: crate::clipboard::MIME_HTML.to_owned(),
-                    bytes: html.as_bytes().to_vec(),
-                    sha256: sha_of(msg),
-                },
-            ))
-        }
+        Message::ClipboardHtml { html, .. } => crate::clipboard::ClipboardEvent::Changed(Box::new(
+            crate::clipboard::ClipboardSnapshot {
+                mime: crate::clipboard::MIME_HTML.to_owned(),
+                bytes: html.as_bytes().to_vec(),
+                sha256: sha_of(msg),
+            },
+        )),
         _ => unreachable!("apenas clipboard messages"),
     }
 }

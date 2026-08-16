@@ -102,10 +102,7 @@ impl Discovery {
         timeout: Duration,
         settle_ms: u64,
     ) -> Result<Vec<DiscoveredService>> {
-        let receiver = self
-            .daemon
-            .browse(SERVICE_TYPE)
-            .map_err(Error::Mdns)?;
+        let receiver = self.daemon.browse(SERVICE_TYPE).map_err(Error::Mdns)?;
 
         let mut seen: HashMap<String, DiscoveredService> = HashMap::new();
         let mut last_change = tokio::time::Instant::now();
@@ -127,10 +124,7 @@ impl Discovery {
             if let ServiceEvent::ServiceResolved(info) = ev {
                 let key = info.get_fullname().to_owned();
                 let addrs: Vec<IpAddr> = info.get_addresses().iter().copied().collect();
-                let instance = info
-                    .get_hostname()
-                    .trim_end_matches(".local.")
-                    .to_owned();
+                let instance = info.get_hostname().trim_end_matches(".local.").to_owned();
                 let properties: HashMap<String, String> = info
                     .get_properties()
                     .iter()

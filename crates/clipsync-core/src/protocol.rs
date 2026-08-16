@@ -164,10 +164,7 @@ pub struct Capabilities {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
     /// Primeira mensagem enviada pelo cliente ao se conectar.
-    Hello {
-        v: u16,
-        device: DeviceInfo,
-    },
+    Hello { v: u16, device: DeviceInfo },
 
     /// Servidor responde com um PIN de 6 dígitos para pareamento.
     PairChallenge {
@@ -180,10 +177,7 @@ pub enum Message {
     },
 
     /// Cliente submete o PIN digitado.
-    PairSubmit {
-        code: String,
-        nonce: String,
-    },
+    PairSubmit { code: String, nonce: String },
 
     /// Servidor confirma pareamento e atribui um device_id estável.
     PairOk {
@@ -241,10 +235,7 @@ pub enum Message {
     Pong { ts: i64 },
 
     /// Erro genérico (ex: payload muito grande, capability não habilitada).
-    Error {
-        code: String,
-        message: String,
-    },
+    Error { code: String, message: String },
 }
 
 impl Message {

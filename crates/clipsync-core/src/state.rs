@@ -58,7 +58,9 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    pub fn new(config: crate::server::ServerConfig) -> (Self, mpsc::Receiver<crate::clipboard::ClipboardEvent>) {
+    pub fn new(
+        config: crate::server::ServerConfig,
+    ) -> (Self, mpsc::Receiver<crate::clipboard::ClipboardEvent>) {
         let (tx, rx) = mpsc::channel(256);
         let state = Self {
             config,
@@ -171,7 +173,10 @@ mod tests {
     use super::*;
     use crate::protocol::{Capabilities, DeviceInfo, DeviceKind};
 
-    fn test_state() -> (SharedState, mpsc::Receiver<crate::clipboard::ClipboardEvent>) {
+    fn test_state() -> (
+        SharedState,
+        mpsc::Receiver<crate::clipboard::ClipboardEvent>,
+    ) {
         let (state, rx) = ServerState::new(crate::server::ServerConfig::default());
         (Arc::new(state), rx)
     }
@@ -182,7 +187,12 @@ mod tests {
         let (tx, _) = mpsc::channel(10);
         let id = DeviceId::new();
         state
-            .add_peer("127.0.0.1:5000".parse().unwrap(), id.clone(), "phone".into(), tx)
+            .add_peer(
+                "127.0.0.1:5000".parse().unwrap(),
+                id.clone(),
+                "phone".into(),
+                tx,
+            )
             .await;
         assert_eq!(state.peer_count().await, 1);
         state.remove_peer(&id).await;
@@ -196,8 +206,12 @@ mod tests {
         let (tx_b, mut rx_b) = mpsc::channel(10);
         let id_a = DeviceId::new();
         let id_b = DeviceId::new();
-        state.add_peer("1.1.1.1:1".parse().unwrap(), id_a.clone(), "a".into(), tx_a).await;
-        state.add_peer("2.2.2.2:2".parse().unwrap(), id_b.clone(), "b".into(), tx_b).await;
+        state
+            .add_peer("1.1.1.1:1".parse().unwrap(), id_a.clone(), "a".into(), tx_a)
+            .await;
+        state
+            .add_peer("2.2.2.2:2".parse().unwrap(), id_b.clone(), "b".into(), tx_b)
+            .await;
 
         let msg = Message::ClipboardText {
             mime: "text/plain".into(),

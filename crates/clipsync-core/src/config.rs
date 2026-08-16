@@ -185,7 +185,10 @@ mod tests {
         let s = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
         assert_eq!(back.server.bind, cfg.server.bind);
-        assert_eq!(back.clipboard.max_image_bytes, cfg.clipboard.max_image_bytes);
+        assert_eq!(
+            back.clipboard.max_image_bytes,
+            cfg.clipboard.max_image_bytes
+        );
     }
 
     #[test]

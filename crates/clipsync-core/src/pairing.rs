@@ -60,27 +60,27 @@ impl PairingManager {
         Self::default()
     }
 
-/// Cria um novo desafio para um device não-confiado.
-/// Se já existe um desafio para esse device, retorna o existente
-/// (evita que o cliente fique esperando um PIN novo a cada conexão).
-pub fn start_challenge(&mut self, device_name: &str) -> PairChallenge {
-    let device_key = device_name.to_owned();
-    // Remove desafio antigo se expirado.
-    self.challenges.remove(&device_key);
+    /// Cria um novo desafio para um device não-confiado.
+    /// Se já existe um desafio para esse device, retorna o existente
+    /// (evita que o cliente fique esperando um PIN novo a cada conexão).
+    pub fn start_challenge(&mut self, device_name: &str) -> PairChallenge {
+        let device_key = device_name.to_owned();
+        // Remove desafio antigo se expirado.
+        self.challenges.remove(&device_key);
 
-    let code = generate_pin();
-    let nonce = generate_nonce();
-    let challenge = PairChallenge {
-        code: code.clone(),
-        nonce: nonce.clone(),
-        expires_at: Instant::now() + DEFAULT_PIN_TTL,
-        attempts_left: MAX_ATTEMPTS,
-        device_name: device_name.to_owned(),
-    };
-    debug!(device = %device_name, %code, "novo desafio de pareamento");
-    self.challenges.insert(device_key, challenge.clone());
-    challenge
-}
+        let code = generate_pin();
+        let nonce = generate_nonce();
+        let challenge = PairChallenge {
+            code: code.clone(),
+            nonce: nonce.clone(),
+            expires_at: Instant::now() + DEFAULT_PIN_TTL,
+            attempts_left: MAX_ATTEMPTS,
+            device_name: device_name.to_owned(),
+        };
+        debug!(device = %device_name, %code, "novo desafio de pareamento");
+        self.challenges.insert(device_key, challenge.clone());
+        challenge
+    }
 
     /// Valida a submissão de PIN. Consome uma tentativa.
     pub fn submit(

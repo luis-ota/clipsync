@@ -108,7 +108,8 @@ impl ClipboardManager {
     /// Constrói um novo manager, selecionando o melhor backend.
     pub fn new() -> Result<Self> {
         let backend = Self::pick_backend();
-        info!(backend = backend.name(), "clipboard backend selected");        Ok(Self {
+        info!(backend = backend.name(), "clipboard backend selected");
+        Ok(Self {
             backend,
             last_self_write: None,
             last_seen: None,
@@ -184,9 +185,9 @@ impl ClipboardManager {
                         .arg(mime)
                         .output();
                     match out {
-                    Ok(o) if o.status.success() && !o.stdout.is_empty() => {
-                        return Ok(Some(Self::snapshot(mime, o.stdout)));
-                    }
+                        Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+                            return Ok(Some(Self::snapshot(mime, o.stdout)));
+                        }
                         Ok(o) if o.status.success() => continue, // vazio
                         Ok(_) => continue,
                         Err(e) => {
@@ -290,10 +291,7 @@ impl ClipboardManager {
                     .map_err(|e| Error::Clipboard(format!("falha wait xclip: {e}")))?;
                 if !out.status.success() {
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    return Err(Error::Clipboard(format!(
-                        "xclip falhou: {}",
-                        stderr.trim()
-                    )));
+                    return Err(Error::Clipboard(format!("xclip falhou: {}", stderr.trim())));
                 }
             }
             BackendKind::Headless => {
@@ -353,7 +351,11 @@ impl ClipboardManager {
                 }
 
                 me.last_seen = Some(snap.sha256.clone());
-                if tx.send(ClipboardEvent::Changed(Box::new(snap))).await.is_err() {
+                if tx
+                    .send(ClipboardEvent::Changed(Box::new(snap)))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }

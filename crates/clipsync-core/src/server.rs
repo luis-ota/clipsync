@@ -141,7 +141,8 @@ async fn healthz() -> impl IntoResponse {
 #[cfg(test)]
 /// Parsea um endereço "ip:port" em SocketAddr, com fallback.
 fn parse_addr(s: &str) -> SocketAddr {
-    s.parse().unwrap_or_else(|_| "0.0.0.0:0".parse().expect("addr estático"))
+    s.parse()
+        .unwrap_or_else(|_| "0.0.0.0:0".parse().expect("addr estático"))
 }
 
 #[cfg(test)]
@@ -180,9 +181,7 @@ mod tests {
     async fn raw_get(addr: &SocketAddr, path: &str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let mut stream = tokio::net::TcpStream::connect(addr)
-            .await
-            .expect("connect");
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
         stream
             .write_all(
                 format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
