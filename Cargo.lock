@@ -331,11 +331,26 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "toml",
  "tracing",
  "uuid",
  "wl-clipboard-rs",
+]
+
+[[package]]
+name = "clipsync-harness"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clipsync-core",
+ "futures",
+ "hex",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
