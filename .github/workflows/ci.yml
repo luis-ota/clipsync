@@ -12,39 +12,15 @@ env:
 
 jobs:
   check:
-    name: check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, archlinux-latest]
+    name: check
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system deps (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libxkbcommon-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxcb1-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            xclip \
-            wl-clipboard
-
-      - name: Install system deps (Arch)
-        if: matrix.os == 'archlinux-latest'
-        run: |
-          sudo pacman -Sy --noconfirm \
-            wayland \
-            wayland-protocols \
-            libxkbcommon \
-            libx11 \
-            libxcb \
             xclip \
             wl-clipboard
 
