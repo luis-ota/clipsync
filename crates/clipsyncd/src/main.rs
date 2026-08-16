@@ -43,6 +43,12 @@ enum Commands {
     ShowAddress,
     /// Instala um unit do systemd --user.
     ServiceInstall,
+    /// Descobre daemons clipsync na rede local via mDNS.
+    Discover {
+        /// Tempo máximo de espera pela descoberta, em segundos.
+        #[arg(long, default_value_t = 5)]
+        timeout: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +168,35 @@ async fn cmd_run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Descobre daemons na rede local via mDNS e imprime os serviços
+/// encontrados (nome, endereços, porta e propriedades TXT).
+async fn cmd_discover(timeout_secs: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let discovery = Discovery::new()?;
+    let timeout = Duration::from_secs(timeout_secs);
+    info!(timeout_secs, "mDNS: buscando serviços na rede local");
+
+    let services = discovery.browse(timeout, 500).await?;
+
+    if services.is_empty() {
+        println!("Nenhum daemon clipsync encontrado na rede local.");
+        return Ok(());
+    }
+
+    println!("Daemons clipsync encontrados ({}):", services.len());
+    for svc in &services {
+        let addrs: Vec<String> = svc.addrs.iter().map(|a| a.to_string()).collect();
+        println!("  {}", svc.instance);
+        println!("    Endereços: {}", addrs.join(", "));
+        println!("    Porta: {}", svc.port);
+        let mut properties: Vec<_> = svc.properties.iter().collect();
+        properties.sort();
+        for (key, value) in properties {
+            println!("    {key}: {value}");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_show_pin() {
     if let Some(pin) = read_current_pin() {
         println!("PIN atual: {pin}");
@@ -246,6 +281,12 @@ async fn main() {
         }
         Some(Commands::ShowAddress) => cmd_show_address(),
         Some(Commands::ServiceInstall) => cmd_service_install(),
+        Some(Commands::Discover { timeout }) => {
+            if let Err(e) = cmd_discover(timeout).await {
+                eprintln!("Erro: {e}");
+                std::process::exit(1);
+            }
+        }
         None => {
             cmd_run(Config::default()).await.ok();
         }
