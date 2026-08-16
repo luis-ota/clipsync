@@ -1,0 +1,251 @@
+//! `clipsyncd` — daemon do server para sincronização de clipboard.
+//!
+//! O daemon escuta conexões WebSocket de clients Android, anuncia-se via
+//! mDNS e sincroniza clipboard text/image entre dispositivos.
+//! Zero cloud, zero servidor externo.
+
+use std::time::Duration;
+
+use clap::{Parser, Subcommand};
+use tokio::signal;
+use tracing::{info, warn};
+
+use clipsync_core::clipboard::{ClipboardEvent, ClipboardManager, WriteOrigin, MIME_HTML};
+use clipsync_core::config::Config;
+use clipsync_core::discovery::Discovery;
+use clipsync_core::protocol::{DeviceId, Message};
+use clipsync_core::server::{Server, ServerConfig};
+use clipsync_core::state::ServerState;
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+#[derive(Parser)]
+#[command(name = "clipsyncd")]
+#[command(about = "Desktop daemon para clipboard universal Linux ↔ Android", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Inicia o daemon (modo foreground com logs e PIN).
+    Run,
+    /// Mostra o PIN de pareamento atual.
+    ShowPin,
+    /// Lista devices pareados e confiados.
+    ListPeers,
+    /// Remove um device da lista de confiados.
+    Untrust { device: String },
+    /// Mostra o endereço mDNS e porta do serviço.
+    ShowAddress,
+    /// Instala um unit do systemd --user.
+    ServiceInstall,
+}
+
+// ---------------------------------------------------------------------------
+// Runtime
+// ---------------------------------------------------------------------------
+
+/// Roda o daemon: server + watcher de clipboard + mDNS.
+async fn cmd_run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    let server_config = ServerConfig::from_config(&config);
+    let (state, mut peer_events_rx) = ServerState::new(server_config.clone());
+    let state = std::sync::Arc::new(state);
+
+    // Clipboard manager
+    let clipboard = ClipboardManager::new()?;
+    clipboard.check_tools().ok();
+
+    // mDNS announce
+    let discovery = Discovery::new()?;
+    let port = config
+        .server
+        .bind
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8765);
+    let _ = discovery.announce(&config.server.name, port);
+
+    // Watcher: clipboard local → peers (broadcast)
+    let watcher_rx = clipboard.watch(Duration::from_millis(config.clipboard.poll_interval_ms));
+    let state_watcher = state.clone();
+    let sync_text = config.clipboard.sync_text;
+    let sync_images = config.clipboard.sync_images;
+    let sync_html = config.clipboard.sync_html;
+    tokio::spawn(async move {
+        let mut rx = watcher_rx;
+        while let Some(evt) = rx.recv().await {
+            match evt {
+                ClipboardEvent::Changed(snap) => {
+                    let msg = match &snap.mime[..] {
+                        m if m.starts_with("text/") && sync_text => Message::ClipboardText {
+                            mime: m.to_owned(),
+                            content: String::from_utf8_lossy(&snap.bytes).into_owned(),
+                            origin: DeviceId::new(),
+                            sha256: snap.sha256,
+                        },
+                        m if m.starts_with("image/") && sync_images => Message::ClipboardImage {
+                            mime: m.to_owned(),
+                            data_b64: {
+                                use base64::Engine;
+                                base64::engine::general_purpose::STANDARD.encode(&snap.bytes)
+                            },
+                            width: None,
+                            height: None,
+                            sha256: snap.sha256,
+                            origin: DeviceId::new(),
+                        },
+                        m if m == MIME_HTML && sync_html => Message::ClipboardHtml {
+                            html: String::from_utf8_lossy(&snap.bytes).into_owned(),
+                            alt: None,
+                            sha256: snap.sha256,
+                            origin: DeviceId::new(),
+                        },
+                        _ => continue,
+                    };
+                    state_watcher.broadcast_except(msg, None).await;
+                }
+                ClipboardEvent::BackendLost(e) => {
+                    warn!(error = %e, "backend de clipboard perdido");
+                }
+            }
+        }
+    });
+
+    // Peers → clipboard local (grava com origem Remote para anti-eco)
+    tokio::spawn(async move {
+        let mut cm = ClipboardManager::new().unwrap_or_else(|_| ClipboardManager::headless());
+        while let Some(evt) = peer_events_rx.recv().await {
+            match evt {
+                ClipboardEvent::Changed(snap) => {
+                    if snap.mime.starts_with("text/") {
+                        let _ = cm.write_text(snap.text().unwrap_or_default(), WriteOrigin::Remote);
+                    } else if snap.mime.starts_with("image/") {
+                        let _ = cm.write_image(&snap.mime, &snap.bytes, WriteOrigin::Remote);
+                    }
+                }
+                ClipboardEvent::BackendLost(e) => {
+                    warn!(error = %e, "backend perdido no fluxo peer→local");
+                }
+            }
+        }
+    });
+
+    // Server
+    let server = Server::new(server_config, state);
+    info!(
+        name = %server.config.name,
+        bind = %server.config.bind,
+        "clipsyncd em execução"
+    );
+
+    tokio::select! {
+        res = server.run() => {
+            if let Err(e) = res {
+                eprintln!("Erro do servidor: {e}");
+                return Err(e.to_string().into());
+            }
+        }
+        _ = async {
+            signal::ctrl_c().await.ok();
+            info!("interrupção solicitada");
+        } => {
+            info!("encerrando");
+        }
+    }
+
+    let _ = discovery;
+    Ok(())
+}
+
+fn cmd_show_pin() {
+    if let Some(pin) = read_current_pin() {
+        println!("PIN atual: {pin}");
+    } else {
+        eprintln!("Nenhum PIN disponível. Rode 'clipsyncd run' para gerar um.");
+    }
+}
+
+fn cmd_show_address() {
+    println!("Serviço mDNS: _clipsync._tcp.local");
+    println!("Porta padrão: 8765 (configurável em config.toml)");
+}
+
+fn cmd_service_install() {
+    let unit = r#"# clipsyncd.service
+[Unit]
+Description=Clipboard sync daemon (Linux <-> Android)
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/clipsyncd run
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+"#;
+    let path = std::path::Path::new("clipsyncd.service");
+    if let Err(e) = std::fs::write(path, unit) {
+        eprintln!("Falha gravando {path:?}: {e}");
+        return;
+    }
+    println!("Unit gerado em {path:?}");
+    println!("Instale com:");
+    println!("  mkdir -p ~/.config/systemd/user");
+    println!("  cp clipsyncd.service ~/.config/systemd/user/");
+    println!("  systemctl --user daemon-reload");
+    println!("  systemctl --user enable --now clipsyncd");
+}
+
+/// Lê o PIN corrente do file de runtime se existir.
+fn read_current_pin() -> Option<String> {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    let pin_path = std::path::Path::new(&runtime_dir).join("clipsync-pin");
+    if pin_path.exists() {
+        std::fs::read_to_string(&pin_path)
+            .ok()
+            .map(|s| s.trim().to_owned())
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt::init();
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Run) => {
+            let config = Config::load_or_default(None).unwrap_or_default();
+            if let Err(e) = cmd_run(config).await {
+                eprintln!("Erro: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::ShowPin) => cmd_show_pin(),
+        Some(Commands::ListPeers) => {
+            eprintln!("ListPeers requer estado do daemon; disponível em versão futura (v0.2)");
+        }
+        Some(Commands::Untrust { device }) => {
+            eprintln!("Untrust ({device}) requer estado do daemon; disponível em versão futura (v0.2)");
+        }
+        Some(Commands::ShowAddress) => cmd_show_address(),
+        Some(Commands::ServiceInstall) => cmd_service_install(),
+        None => {
+            cmd_run(Config::default()).await.ok();
+        }
+    }
+}

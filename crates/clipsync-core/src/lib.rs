@@ -1,0 +1,37 @@
+//! `clipsync-core` — núcleo reutilizável do `clipsync`.
+//!
+//! Esta crate contém toda a lógica "headless": protocolo, transporte
+//! WebSocket, descoberta mDNS, abstração de clipboard, pareamento e
+//! estado de peers. Ela é desenhada para ser usada tanto pelo daemon
+//! (`clipsyncd`) quanto, eventualmente, por um cliente desktop ou
+//! um binding para o app Android.
+//!
+//! Não há nenhuma dependência de GUI ou platform-specific além do
+//! backend de clipboard (Wayland / X11) — toda a lógica de negócio
+//! é agnóstica de plataforma.
+
+#![deny(rust_2018_idioms)]
+#![warn(missing_debug_implementations)]
+#![warn(unreachable_pub)]
+
+pub mod clipboard;
+pub mod config;
+pub mod discovery;
+pub mod error;
+pub mod pairing;
+pub mod peer;
+pub mod protocol;
+pub mod server;
+pub mod state;
+pub mod transport;
+
+pub use error::{Error, Result};
+pub use protocol::{DeviceId, DeviceInfo, DeviceKind, Message};
+
+/// Versão do protocolo de aplicação. Incrementado em mudanças
+/// incompatíveis.
+pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Tipo de serviço mDNS anunciado pelo daemon. Dispositivos clientes
+/// (apps Android) fazem browse nesse tipo para descobrir o PC.
+pub const SERVICE_TYPE: &str = "_clipsync._tcp.local.";

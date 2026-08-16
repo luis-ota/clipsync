@@ -1,0 +1,476 @@
+//! Transporte: conexão WebSocket individual com um peer.
+//!
+//! Encapsula o ciclo de vida de uma conexão: handshake HTTP → upgrade
+//! WebSocket → estado de pareamento → streaming de mensagens, com
+//! uma task de escrita (fila) e uma task de leitura.
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use base64::Engine;
+use axum::extract::ws::{Message as WsMessage, WebSocket};
+use futures::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+use tokio::time::interval;
+use tracing::{debug, error, info, warn};
+
+use crate::error::{Error, Result};
+use crate::peer::PeerSession;
+use crate::protocol::{DeviceId, DeviceInfo, Message, PROTOCOL_VERSION};
+use crate::server::ServerConfig;
+use crate::state::SharedState;
+
+/// Limite de tamanho de um frame binário (256 MiB, usado em v0.3
+/// para arquivos).
+const MAX_BINARY_FRAME: usize = 256 * 1024 * 1024;
+/// Timeout para o handshake inicial (hello) e pareamento.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Uma conexão ativa. Duas tasks: `writer` (drena a fila de envio)
+/// e o caller `reader` (lê frames do socket).
+#[derive(Debug)]
+pub struct Connection {
+    pub socket: WebSocket,
+    pub addr: SocketAddr,
+    pub state: SharedState,
+    pub config: ServerConfig,
+}
+
+impl Connection {
+    /// Roda a sessão completa da conexão. Não retorna erro fatal —
+    /// erros de um peer são logs e a conexão é fechada.
+    pub async fn run(self) {
+        let Connection {
+            socket,
+            addr,
+            state,
+            config,
+        } = self;
+        let (mut tx, mut rx) = socket.split();
+        let (out_tx, mut out_rx) = mpsc::channel::<Message>(128);
+
+        let mut session = PeerSession::new(state.clone(), addr, out_tx.clone());
+
+        // Writer task
+        let writer = tokio::spawn(async move {
+            while let Some(msg) = out_rx.recv().await {
+                let payload = msg.wrap().to_string();
+                if tx.send(WsMessage::Text(payload)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Reader loop
+        let mut conn = ConnectionInner {
+            addr,
+            state,
+            config,
+        };
+        let result = conn.reader_loop(&mut rx, &mut session).await;
+
+        // Encerra o writer
+        drop(out_tx);
+        let _ = writer.await;
+        drop(rx);
+
+        if let Err(e) = result {
+            debug!(peer = %addr, error = %e, "sessão encerrada com erro");
+        }
+    }
+}
+
+/// Parte da conexão sem o socket (para pós-split).
+#[derive(Debug)]
+pub struct ConnectionInner {
+    pub addr: SocketAddr,
+    pub state: SharedState,
+    pub config: ServerConfig,
+}
+
+impl ConnectionInner {
+
+    async fn reader_loop<R>(&mut self, rx: &mut R, session: &mut PeerSession) -> Result<()>
+    where
+        R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
+    {
+        // Handshake: espera `hello` dentro do timeout.
+        let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.await_hello(rx)).await;
+        let (device_info, device_id) = match hello {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                warn!(peer = %self.addr, "handshake timeout; fechando");
+                return Ok(());
+            }
+        };
+
+        // Pareamento: se o device é confiado, aceita direto.
+        // Caso contrário, inicia desafio de PIN.
+        let trusted = {
+            let pm = self.state.pairing.lock().await;
+            device_id
+                .as_ref()
+                .map(|id| pm.is_trusted(id))
+                .unwrap_or(false)
+        };
+
+        if trusted {
+            let id = device_id.clone().unwrap();
+            let name = {
+                let pm = self.state.pairing.lock().await;
+                pm.device_name(&id).unwrap_or(&device_info.name).to_owned()
+            };
+            self.state.pairing.lock().await.mark_seen(&id);
+            info!(peer = %self.addr, device = %id, name = %name, "device confiado conectado");
+            session.attach(id.clone(), name.clone());
+            session.send(Message::PairOk {
+                device_id: id,
+                session_id: uuid::Uuid::new_v4().to_string(),
+                server_name: self.config.name.clone(),
+                capabilities: self.state_caps(&device_info),
+            });
+        } else {
+            // Novo device: fluxo de PIN.
+            self.pairing_flow(rx, session, &device_info).await?;
+        }
+
+        // Mensagens pós-pareamento.
+        self.message_loop(rx, session).await
+    }
+
+    /// Espera a primeira mensagem `hello`.
+    async fn await_hello<R>(
+        &mut self,
+        rx: &mut R,
+    ) -> Result<(DeviceInfo, Option<DeviceId>)>
+    where
+        R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
+    {
+        while let Some(item) = rx.next().await {
+            let ws_msg = item.map_err(|e| Error::WebSocket(e.to_string()))?;
+            match ws_msg {
+                WsMessage::Text(text) => {
+                    let msg: Message = serde_json::from_str(&text)
+                        .map_err(|e| Error::Protocol(format!("JSON inválido: {e}")))?;
+                    match msg {
+                        Message::Hello { v, device } => {
+                            if v != PROTOCOL_VERSION {
+                                return Err(Error::Protocol(format!(
+                                    "versão incompatível: cliente {v}, servidor {PROTOCOL_VERSION}"
+                                )));
+                            }
+                            return Ok((device.clone(), device.id));
+                        }
+                        other => {
+                            warn!(peer = %self.addr, msg = other.type_name(), "esperava hello, recebeu outra");
+                            return Err(Error::Protocol(
+                                "primeira mensagem deve ser hello".into(),
+                            ));
+                        }
+                    }
+                }
+                WsMessage::Close(_) => {
+                    return Err(Error::Protocol("fechado antes do hello".into()))
+                }
+                WsMessage::Binary(_) => {
+                    return Err(Error::Protocol("esperava hello (texto), recebeu binário".into()))
+                }
+                WsMessage::Ping(_) | WsMessage::Pong(_) => {}
+            }
+        }
+        Err(Error::Protocol("conexão fechada durante handshake".into()))
+    }
+
+    /// Executa o fluxo de pareamento: envia desafio, espera submissão.
+    async fn pairing_flow<R>(
+        &mut self,
+        rx: &mut R,
+        session: &mut PeerSession,
+        device_info: &DeviceInfo,
+    ) -> Result<()>
+    where
+        R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
+    {
+        let device_name = device_info.name.clone();
+        let (code, nonce) = {
+            let mut pm = self.state.pairing.lock().await;
+            let ch = pm.start_challenge(&device_name);
+            (ch.code.clone(), ch.nonce.clone())
+        };
+        info!(peer = %self.addr, device = %device_name, code = %code, "novo device: desafio de PIN enviado");
+        session.send(Message::PairChallenge {
+            code,
+            expires_at: chrono::Utc::now().timestamp() + 120,
+            nonce,
+        });
+
+        while let Some(item) = rx.next().await {
+            let ws_msg = item.map_err(|e| Error::WebSocket(e.to_string()))?;
+            match ws_msg {
+                WsMessage::Text(text) => {
+                    let msg: Message = serde_json::from_str(&text)
+                        .map_err(|e| Error::Protocol(format!("JSON inválido: {e}")))?;
+                    match msg {
+                        Message::PairSubmit { code, nonce } => {
+                            let result = self
+                                .state
+                                .pairing
+                                .lock()
+                                .await
+                                .submit(&device_name, &nonce, &code);
+                            match result {
+                                Ok(id) => {
+                                    info!(peer = %self.addr, device = %id, "pareamento concluído");
+                                    session.attach(id.clone(), device_name);
+                                    session.send(Message::PairOk {
+                                        device_id: id,
+                                        session_id: uuid::Uuid::new_v4().to_string(),
+                                        server_name: self.config.name.clone(),
+                                        capabilities: self.state_caps(device_info),
+                                    });
+                                    return Ok(());
+                                }
+                                Err(reason) => {
+                                    session.send(Message::PairFail {
+                                        reason,
+                                        message: "PIN inválido ou expirado".into(),
+                                    });
+                                    return Err(Error::Pairing("PIN incorreto".into()));
+                                }
+                            }
+                        }
+                        other => {
+                            warn!(
+                                peer = %self.addr,
+                                msg = other.type_name(),
+                                "mensagem inesperada durante pareamento"
+                            );
+                            return Err(Error::Protocol("pareamento interrompido".into()));
+                        }
+                    }
+                }
+                WsMessage::Close(_) => {
+                    return Err(Error::Protocol("fechado durante pareamento".into()))
+                }
+                WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Binary(_) => continue,
+            }
+        }
+        Err(Error::Protocol(
+            "conexão fechada durante pareamento".into(),
+        ))
+    }
+
+    /// Calcula capabilities do servidor com base na config e no device.
+    fn state_caps(&self, device: &DeviceInfo) -> crate::protocol::Capabilities {
+        crate::protocol::Capabilities {
+            text: self.config.clipboard.sync_text && device.capabilities.text,
+            html: self.config.clipboard.sync_html && device.capabilities.html,
+            images: self.config.clipboard.sync_images && device.capabilities.images,
+            files: self.config.clipboard.sync_files && device.capabilities.files,
+        }
+    }
+
+    /// Loop de mensagens pós-pareamento: repassa mensagens de
+    /// clipboard dos peers, escreve no clipboard local e responde pings.
+    async fn message_loop<R>(&mut self, rx: &mut R, session: &mut PeerSession) -> Result<()>
+    where
+        R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
+    {
+        // Keepalive task: envia ping a cada intervalo.
+        let mut ping_timer = interval(crate::state::peer_ping_interval());
+        let idle_timer = tokio::time::sleep(crate::state::peer_idle_timeout());
+        tokio::pin!(idle_timer);
+
+        let shutdown = crate::state::shutdown_token(&self.state);
+
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    debug!(peer = %self.addr, "shutdown global; fechando conexão");
+                    return Ok(());
+                }
+                _ = ping_timer.tick() => {
+                    session.send(Message::Ping { ts: chrono::Utc::now().timestamp() });
+                }
+                _ = &mut idle_timer => {
+                    warn!(peer = %self.addr, "peer inativo; fechando");
+                    return Ok(());
+                }
+                item = rx.next() => {
+                    match item {
+                        Some(Ok(ws_msg)) => match ws_msg {
+                            WsMessage::Text(text) => {
+                                let msg: Message = match serde_json::from_str(&text) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        debug!(peer = %self.addr, error = %e, "JSON inválido ignorado");
+                                        continue;
+                                    }
+                                };
+                                match msg {
+                                    Message::Ping { ts } => {
+                                        session.send(Message::Pong { ts });
+                                    }
+                                    Message::Pong { .. } => {
+                                        idle_timer.as_mut().reset(
+                                            tokio::time::Instant::now()
+                                                + crate::state::peer_idle_timeout(),
+                                        );
+                                    }
+                                    Message::ClipboardText { .. }
+                                    | Message::ClipboardImage { .. }
+                                    | Message::ClipboardHtml { .. } => {
+                                        match self.enforce_caps(&msg) {
+                                            Ok(()) => {}
+                                            Err(_) => {
+                                                // Capability desabilitada: avisa e ignora.
+                                                session.send(Message::Error {
+                                                    code: "capability_disabled".into(),
+                                                    message: format!(
+                                                        "tipo '{}' não habilitado na config",
+                                                        msg.type_name()
+                                                    ),
+                                                });
+                                                continue;
+                                            }
+                                        }
+                                        let origin = session.peer_id().clone();
+                                        // 1) Repassa para outros peers.
+                                        self.state.broadcast_except(msg.clone(), Some(&origin)).await;
+                                        // 2) Publica no canal local p/ o daemon gravar no clipboard.
+                                        let _ = self
+                                            .state
+                                            .local_events
+                                            .send(peer_snapshot(&msg))
+                                            .await;
+                                    }
+                                    other => {
+                                        debug!(peer = %self.addr, msg = other.type_name(), "tipo não tratado");
+                                    }
+                                }
+                            }
+                            WsMessage::Binary(data) => {
+                                if data.len() > MAX_BINARY_FRAME {
+                                    warn!(peer = %self.addr, size = data.len(), "frame binário grande demais");
+                                    return Err(Error::PayloadTooLarge {
+                                        size: data.len(),
+                                        max: MAX_BINARY_FRAME,
+                                    });
+                                }
+                                // v0.3: transferência de arquivos.
+                                debug!(peer = %self.addr, size = data.len(), "frame binário recebido (v0.3)");
+                            }
+                            WsMessage::Ping(data) => {
+                                let _ = data;
+                            }
+                            WsMessage::Pong(_) => {}
+                            WsMessage::Close(_) => {
+                                debug!(peer = %self.addr, "peer fechou a conexão");
+                                return Ok(());
+                            }
+                        },
+                        Some(Err(e)) => {
+                            error!(peer = %self.addr, error = %e, "erro de websocket");
+                            return Err(Error::WebSocket(e.to_string()));
+                        }
+                        None => {
+                            debug!(peer = %self.addr, "conexão fechada pelo peer");
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Verifica se o tipo de mensagem está habilitado na config.
+    fn enforce_caps(&self, msg: &Message) -> Result<()> {
+        let caps = &self.config.clipboard;
+        let enabled = match msg {
+            Message::ClipboardText { .. } => caps.sync_text,
+            Message::ClipboardImage { .. } => caps.sync_images,
+            Message::ClipboardHtml { .. } => caps.sync_html,
+            _ => true,
+        };
+        if enabled {
+            Ok(())
+        } else {
+            Err(Error::Protocol("capability não habilitada".into()))
+        }
+    }
+}
+
+/// Converte uma mensagem de clipboard de um peer em um snapshot
+/// para o canal local.
+fn peer_snapshot(msg: &Message) -> crate::clipboard::ClipboardEvent {
+    match msg {
+        Message::ClipboardText { content, .. } => {
+            crate::clipboard::ClipboardEvent::Changed(Box::new(
+                crate::clipboard::ClipboardSnapshot {
+                    mime: crate::clipboard::MIME_TEXT.to_owned(),
+                    bytes: content.as_bytes().to_vec(),
+                    sha256: sha_of(msg),
+                },
+            ))
+        }
+        Message::ClipboardImage { data_b64, mime, .. } => {
+            crate::clipboard::ClipboardEvent::Changed(Box::new(
+                crate::clipboard::ClipboardSnapshot {
+                    mime: mime.clone(),
+                    bytes: base64::engine::general_purpose::STANDARD
+                        .decode(data_b64)
+                        .unwrap_or_default(),
+                    sha256: sha_of(msg),
+                },
+            ))
+        }
+        Message::ClipboardHtml { html, .. } => {
+            crate::clipboard::ClipboardEvent::Changed(Box::new(
+                crate::clipboard::ClipboardSnapshot {
+                    mime: crate::clipboard::MIME_HTML.to_owned(),
+                    bytes: html.as_bytes().to_vec(),
+                    sha256: sha_of(msg),
+                },
+            ))
+        }
+        _ => unreachable!("apenas clipboard messages"),
+    }
+}
+
+fn sha_of(msg: &Message) -> String {
+    match msg {
+        Message::ClipboardText { sha256, .. }
+        | Message::ClipboardImage { sha256, .. }
+        | Message::ClipboardHtml { sha256, .. } => sha256.clone(),
+        _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::PairFailReason;
+
+    #[test]
+    fn peer_snapshot_builds_snapshot() {
+        let msg = Message::ClipboardText {
+            mime: "text/plain".into(),
+            content: "hello".into(),
+            origin: DeviceId::new(),
+            sha256: "abc".into(),
+        };
+        match peer_snapshot(&msg) {
+            crate::clipboard::ClipboardEvent::Changed(snap) => {
+                assert_eq!(snap.text(), Some("hello"));
+            }
+            _ => panic!("esperava Changed"),
+        }
+    }
+
+    #[test]
+    fn pair_fail_reason_display() {
+        assert_eq!(PairFailReason::InvalidCode.to_string(), "invalid_code");
+        assert_eq!(PairFailReason::Expired.to_string(), "expired");
+    }
+}

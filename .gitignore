@@ -1,0 +1,26 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+*.swp
+*.swo
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / state
+*.log
+*.local.toml
+secrets/
+
+# Build artifacts
+*.d
+*.o
+*.so
+*.dylib
+*.dll
