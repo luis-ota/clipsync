@@ -69,7 +69,8 @@ impl Connection {
         };
         let result = conn.reader_loop(&mut rx, &mut session).await;
 
-        // Encerra o writer
+        // Desregistra o peer e encerra o writer.
+        session.detach().await;
         drop(out_tx);
         let _ = writer.await;
         drop(rx);
@@ -122,7 +123,7 @@ impl ConnectionInner {
             };
             self.state.pairing.lock().await.mark_seen(&id);
             info!(peer = %self.addr, device = %id, name = %name, "device confiado conectado");
-            session.attach(id.clone(), name.clone());
+            session.attach(id.clone(), name.clone()).await;
             session.send(Message::PairOk {
                 device_id: id,
                 session_id: uuid::Uuid::new_v4().to_string(),
@@ -218,7 +219,7 @@ impl ConnectionInner {
                             match result {
                                 Ok(id) => {
                                     info!(peer = %self.addr, device = %id, "pareamento concluído");
-                                    session.attach(id.clone(), device_name);
+                                    session.attach(id.clone(), device_name).await;
                                     session.send(Message::PairOk {
                                         device_id: id,
                                         session_id: uuid::Uuid::new_v4().to_string(),

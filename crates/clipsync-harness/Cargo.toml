@@ -1,0 +1,22 @@
+[package]
+name = "clipsync-harness"
+description = "Client WebSocket de referência do protocolo clipsync (teste manual e de integração)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tokio-tungstenite.workspace = true
+sha2.workspace = true
+hex.workspace = true
+clipsync-core = { path = "../clipsync-core" }
+clap = { workspace = true, features = ["derive"] }

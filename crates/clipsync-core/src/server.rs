@@ -104,7 +104,9 @@ impl Server {
         self.state.pairing.lock().await.untrust(&id)
     }
 
-    fn router(&self) -> Router {
+    /// Monta o Router axum (endpoints `/ws` e `/healthz`).
+    /// Público para permitir embedding e testes de integração.
+    pub fn router(&self) -> Router {
         Router::new()
             .route("/ws", get(ws_handler))
             .route("/healthz", get(healthz))

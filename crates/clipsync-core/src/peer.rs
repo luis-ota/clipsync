@@ -33,10 +33,21 @@ impl PeerSession {
         }
     }
 
-    /// Associa um device à sessão (após pareamento ou trust).
-    pub fn attach(&mut self, device_id: DeviceId, name: String) {
-        self.device_id = Some(device_id);
-        self.name = name;
+    /// Associa um device à sessão (após pareamento ou trust) e
+    /// registra o peer no estado compartilhado.
+    pub async fn attach(&mut self, device_id: DeviceId, name: String) {
+        self.device_id = Some(device_id.clone());
+        self.name = name.clone();
+        self.state
+            .add_peer(self.addr, device_id, name, self.tx.clone())
+            .await;
+    }
+
+    /// Desregistra o peer do estado compartilhado (fim da conexão).
+    pub async fn detach(&mut self) {
+        if let Some(id) = self.device_id.take() {
+            self.state.remove_peer(&id).await;
+        }
     }
 
     pub fn peer_id(&self) -> &DeviceId {
@@ -70,10 +81,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let mut session = PeerSession::new(state, "127.0.0.1:1".parse().unwrap(), tx);
         let id = DeviceId::new();
-        session.attach(id, "phone".into());
+        session.attach(id.clone(), "phone".into()).await;
         assert_eq!(session.peer_id().0, session.peer_id().0);
+        assert_eq!(session.state.peer_count().await, 1);
 
         session.send(Message::Ping { ts: 1 });
         assert!(rx.try_recv().is_ok());
+
+        session.detach().await;
+        assert_eq!(session.state.peer_count().await, 0);
     }
 }
