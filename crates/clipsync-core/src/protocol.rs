@@ -268,6 +268,49 @@ impl Message {
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
+
+    /// Retorna uma cópia com `origin` sobreposto nas mensagens de
+    /// clipboard. Usado pelo servidor para tornar o origin
+    /// autoritativo, ignorando o valor declarado pelo client.
+    pub fn with_origin(&self, origin: DeviceId) -> Message {
+        match self {
+            Self::ClipboardText {
+                mime,
+                content,
+                sha256,
+                ..
+            } => Self::ClipboardText {
+                mime: mime.clone(),
+                content: content.clone(),
+                origin,
+                sha256: sha256.clone(),
+            },
+            Self::ClipboardImage {
+                mime,
+                data_b64,
+                width,
+                height,
+                sha256,
+                ..
+            } => Self::ClipboardImage {
+                mime: mime.clone(),
+                data_b64: data_b64.clone(),
+                width: *width,
+                height: *height,
+                sha256: sha256.clone(),
+                origin,
+            },
+            Self::ClipboardHtml {
+                html, alt, sha256, ..
+            } => Self::ClipboardHtml {
+                html: html.clone(),
+                alt: alt.clone(),
+                sha256: sha256.clone(),
+                origin,
+            },
+            other => other.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,5 +357,23 @@ mod tests {
         let s = serde_json::to_string(&id).unwrap();
         let back: DeviceId = serde_json::from_str(&s).unwrap();
         assert_eq!(id, back);
+    }
+
+    #[test]
+    fn with_origin_overrides_client_declared_origin() {
+        let auth = DeviceId::from("auth-id");
+        let forged = DeviceId::from("forjado-pelo-client");
+        let msg = Message::ClipboardText {
+            mime: "text/plain".into(),
+            content: "ola".into(),
+            origin: forged,
+            sha256: "abc".into(),
+        };
+        match msg.with_origin(auth.clone()) {
+            Message::ClipboardText { origin, .. } => {
+                assert_eq!(origin, auth);
+            }
+            other => panic!("esperava clipboard_text, recebeu {}", other.type_name()),
+        }
     }
 }

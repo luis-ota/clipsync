@@ -80,6 +80,15 @@ CLIENT                            SERVER
 
 ## Mensagens de clipboard
 
+> O campo `origin` é **autoritativo no servidor**: ao repassar uma
+> mensagem de clipboard, o servidor sobrepõe `origin` com o
+> `device_id` autenticado da sessão remetente, ignorando o valor
+> declarado pelo client. Clients não devem forjar `origin` — o valor
+> final é sempre o do remetente autenticado. O daemon emite `origin`
+> com seu próprio `device_id` persistido (estável por sessão), nunca
+> um UUID novo por frame, para que o dedup `last_origin + last_seq`
+> dos clients funcione.
+
 ### Texto
 
 ```json
