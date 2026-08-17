@@ -52,6 +52,47 @@ pub struct ClipboardSnapshot {
 }
 
 impl ClipboardSnapshot {
+    /// Constrói um snapshot de texto plain. Sem conteúdo rich text.
+    pub fn new_text(mime: &str, bytes: Vec<u8>, sha256: String) -> Self {
+        Self {
+            mime: mime.to_owned(),
+            bytes,
+            sha256,
+            html: None,
+            html_sha256: None,
+        }
+    }
+
+    /// Constrói um snapshot de imagem. Sem conteúdo rich text.
+    pub fn new_image(mime: &str, bytes: Vec<u8>, sha256: String) -> Self {
+        Self {
+            mime: mime.to_owned(),
+            bytes,
+            sha256,
+            html: None,
+            html_sha256: None,
+        }
+    }
+
+    /// Constrói um snapshot de rich text (HTML).
+    ///
+    /// `bytes` carrega o texto plain alternativo (`alt`) quando
+    /// disponível, servindo de fallback para backends que não
+    /// suportam escrita seletiva de text/html. `sha256` é o hash do
+    /// HTML, espelhado em `html_sha256`.
+    pub fn new_html(html: String, alt: Option<String>, sha256: String) -> Self {
+        let bytes = alt
+            .map(|a| a.into_bytes())
+            .unwrap_or_else(|| html.as_bytes().to_vec());
+        Self {
+            mime: MIME_HTML.to_owned(),
+            bytes,
+            sha256: sha256.clone(),
+            html: Some(html),
+            html_sha256: Some(sha256),
+        }
+    }
+
     pub fn text(&self) -> Option<&str> {
         if self.mime.starts_with("text/") {
             std::str::from_utf8(&self.bytes).ok()
@@ -290,12 +331,10 @@ impl ClipboardManager {
 
     fn snapshot(mime: &str, bytes: Vec<u8>) -> ClipboardSnapshot {
         let sha256 = hex::encode(Sha256::digest(&bytes));
-        ClipboardSnapshot {
-            mime: mime.to_owned(),
-            bytes,
-            sha256,
-            html: None,
-            html_sha256: None,
+        if mime.starts_with("image/") {
+            ClipboardSnapshot::new_image(mime, bytes, sha256)
+        } else {
+            ClipboardSnapshot::new_text(mime, bytes, sha256)
         }
     }
 
@@ -634,6 +673,23 @@ async fn run_polling(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_constructor_uses_alt_as_bytes() {
+        let s = ClipboardSnapshot::new_html("<b>oi</b>".into(), Some("oi".into()), "sha123".into());
+        assert_eq!(s.mime, MIME_HTML);
+        assert_eq!(s.bytes, b"oi".to_vec());
+        assert_eq!(s.html(), Some("<b>oi</b>"));
+        assert_eq!(s.sha256, "sha123");
+        assert_eq!(s.html_sha256.as_deref(), Some("sha123"));
+    }
+
+    #[test]
+    fn html_constructor_falls_back_to_html_bytes() {
+        let s = ClipboardSnapshot::new_html("<b>oi</b>".into(), None, "sha123".into());
+        assert_eq!(s.bytes, b"<b>oi</b>".to_vec());
+        assert_eq!(s.html_sha256.as_deref(), Some("sha123"));
+    }
 
     #[test]
     fn snapshot_hashes_deterministically() {
