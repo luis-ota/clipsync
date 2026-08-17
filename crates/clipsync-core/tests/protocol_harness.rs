@@ -76,49 +76,10 @@ async fn run_client(
         .await
         .expect("client conectou no ws");
 
-    // 1) hello com device novo (id = None -> dispara pair_challenge).
-    let device_name = format!("harness-integration-{}", uuid::Uuid::new_v4());
-    let device = DeviceInfo::new(device_name.clone(), DeviceKind::Linux)
-        .with_app_version("clipsync-harness 0.1.0")
-        .with_capabilities(Capabilities {
-            text: true,
-            ..Capabilities::default()
-        });
-    send_json(
-        &mut ws,
-        Message::Hello {
-            v: PROTOCOL_VERSION,
-            device,
-        },
-    )
-    .await;
+    // 1) hello com device novo (id = None -> dispara pair_challenge) e
+    //    pareamento completo até pair_ok.
+    let device_id = pair_new_client(&mut ws, state).await;
 
-    // 2) pair_challenge: o PIN chega na própria mensagem do servidor.
-    let (code, nonce) = match recv_message(&mut ws).await {
-        Message::PairChallenge { code, nonce, .. } => (code, nonce),
-        other => panic!("esperava pair_challenge, recebeu {}", other.type_name()),
-    };
-    assert_eq!(code.len(), 6, "PIN deve ter 6 dígitos");
-    assert!(code.chars().all(|c| c.is_ascii_digit()), "PIN numérico");
-
-    // 3) pair_submit ecoando o PIN + nonce recebidos.
-    send_json(&mut ws, Message::PairSubmit { code, nonce }).await;
-
-    // 4) pair_ok com device_id estável.
-    let (device_id, server_name) = match recv_message(&mut ws).await {
-        Message::PairOk {
-            device_id,
-            session_id,
-            server_name,
-            capabilities,
-        } => {
-            assert!(!session_id.is_empty(), "session_id presente");
-            assert!(capabilities.text, "text habilitado no pareamento");
-            (device_id, server_name)
-        }
-        other => panic!("esperava pair_ok, recebeu {}", other.type_name()),
-    };
-    assert_eq!(server_name, "linux-desktop");
     assert!(
         state.pairing.lock().await.is_trusted(&device_id),
         "device confiado após o pareamento"
@@ -181,6 +142,128 @@ async fn run_client(
             assert_eq!(snap.sha256, client_sha);
         }
         ClipboardEvent::BackendLost(e) => panic!("BackendLost inesperado: {e}"),
+    }
+}
+
+/// Executa o handshake completo de um client novo (hello → pair_challenge
+/// → pair_submit → pair_ok) e devolve o device_id autenticado.
+async fn pair_new_client(ws: &mut WsStream, state: &std::sync::Arc<ServerState>) -> DeviceId {
+    let device_name = format!("harness-{}", uuid::Uuid::new_v4());
+    let device = DeviceInfo::new(device_name.clone(), DeviceKind::Linux)
+        .with_app_version("clipsync-harness 0.1.0")
+        .with_capabilities(Capabilities {
+            text: true,
+            ..Capabilities::default()
+        });
+    send_json(
+        ws,
+        Message::Hello {
+            v: PROTOCOL_VERSION,
+            device,
+        },
+    )
+    .await;
+
+    let (code, nonce) = match recv_message(ws).await {
+        Message::PairChallenge { code, nonce, .. } => (code, nonce),
+        other => panic!("esperava pair_challenge, recebeu {}", other.type_name()),
+    };
+    assert_eq!(code.len(), 6, "PIN deve ter 6 dígitos");
+    assert!(code.chars().all(|c| c.is_ascii_digit()), "PIN numérico");
+
+    send_json(ws, Message::PairSubmit { code, nonce }).await;
+
+    match recv_message(ws).await {
+        Message::PairOk {
+            device_id,
+            session_id,
+            server_name,
+            capabilities,
+        } => {
+            assert!(!session_id.is_empty(), "session_id presente");
+            assert_eq!(server_name, "linux-desktop");
+            assert!(capabilities.text, "text habilitado no pareamento");
+            assert!(
+                state.pairing.lock().await.is_trusted(&device_id),
+                "device confiado após o pareamento"
+            );
+            device_id
+        }
+        other => panic!("esperava pair_ok, recebeu {}", other.type_name()),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_overrides_forged_origin_with_authenticated_device_id() {
+    let (state, _local_rx) = ServerState::new(ServerConfig::default());
+    let state = std::sync::Arc::new(state);
+    let server = Server::new(ServerConfig::default(), state.clone());
+    let app = server.router();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let result = tokio::time::timeout(TEST_TIMEOUT, run_origin_forgery(&addr, &state)).await;
+
+    handle.abort();
+    let _ = handle.await;
+
+    result.expect("teste excedeu o timeout total");
+}
+
+/// Dois clients pareados; A envia `clipboard_text` com `origin` forjado
+/// e B deve receber o `origin` do device_id autenticado de A.
+async fn run_origin_forgery(addr: &SocketAddr, state: &std::sync::Arc<ServerState>) {
+    let url = format!("ws://{addr}/ws");
+
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("client A conectou no ws");
+    let device_a = pair_new_client(&mut ws_a, state).await;
+
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("client B conectou no ws");
+    let device_b = pair_new_client(&mut ws_b, state).await;
+    assert_ne!(device_a, device_b, "pareamentos geram device_ids distintos");
+    assert_eq!(state.peer_count().await, 2);
+
+    // A forja um origin de outro device; o servidor deve sobrepor com
+    // o device_id autenticado de A antes de repassar a B.
+    let forged = DeviceId::from("origin-forjado-pelo-client");
+    let forged_content = "texto com origin forjado";
+    send_json(
+        &mut ws_a,
+        Message::ClipboardText {
+            mime: MIME_TEXT.to_owned(),
+            content: forged_content.to_owned(),
+            origin: forged.clone(),
+            sha256: sha256_hex(forged_content),
+        },
+    )
+    .await;
+
+    match recv_message(&mut ws_b).await {
+        Message::ClipboardText {
+            content, origin, ..
+        } => {
+            assert_eq!(content, forged_content);
+            assert_eq!(
+                origin, device_a,
+                "origin deve ser o device_id autenticado de A"
+            );
+            assert_ne!(origin, forged, "origin forjado pelo client é ignorado");
+        }
+        other => panic!("esperava clipboard_text, recebeu {}", other.type_name()),
     }
 }
 
