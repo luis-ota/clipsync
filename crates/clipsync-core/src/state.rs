@@ -15,10 +15,25 @@ use crate::protocol::{DeviceId, Message};
 
 /// Capacidade do canal de envio por peer.
 const PEER_QUEUE: usize = 128;
-/// Timeout para considerar um peer morto (sem ping).
+/// Timeout para considerar um peer morto (sem pong).
 const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Intervalo de keepalive.
-const PEER_PING_INTERVAL: Duration = Duration::from_secs(15);
+/// Intervalo de keepalive quando há ao menos um peer conectado.
+const PEER_PING_INTERVAL_ACTIVE: Duration = Duration::from_secs(30);
+/// Intervalo de keepalong quando o daemon está idle (sem peers).
+/// Na prática o loop de ping é por-conexão e só roda com um peer
+/// ativo, então esse valor documenta o comportamento "pausado":
+/// nenhum ping é enviado quando `peer_count == 0`.
+const PEER_PING_INTERVAL_IDLE: Duration = Duration::from_secs(120);
+
+/// Intervalo de ping adaptativo: sem peers → idle (loop pausado);
+/// com peers → active. Testável sem display (lógica pura).
+pub(crate) fn peer_ping_interval_for(peer_count: usize) -> Duration {
+    if peer_count == 0 {
+        PEER_PING_INTERVAL_IDLE
+    } else {
+        PEER_PING_INTERVAL_ACTIVE
+    }
+}
 
 /// Uma conexão de peer ativa (o outro lado do WebSocket).
 #[derive(Debug, Clone)]
@@ -146,9 +161,11 @@ pub(crate) fn peer_idle_timeout() -> Duration {
     PEER_IDLE_TIMEOUT
 }
 
-/// Intervalo de ping (re)exportado para o server.
+/// Intervalo de ping (re)exportado para o server. Sempre retorna o
+/// intervalo ativo, pois o loop de ping só existe com um peer
+/// conectado; sem peers, nenhum ping é enviado (loop pausado).
 pub(crate) fn peer_ping_interval() -> Duration {
-    PEER_PING_INTERVAL
+    peer_ping_interval_for(1)
 }
 
 /// Capacidade padrão da fila de um peer.
@@ -236,5 +253,16 @@ mod tests {
         let caps = Capabilities::default();
         assert!(!caps.files);
         assert!(!caps.text);
+    }
+
+    #[test]
+    fn ping_interval_adapts_to_peer_count() {
+        // Sem peers: intervalo idle (loop na prática pausado).
+        assert_eq!(peer_ping_interval_for(0), Duration::from_secs(120));
+        // Com 1+ peers: intervalo ativo.
+        assert_eq!(peer_ping_interval_for(1), Duration::from_secs(30));
+        assert_eq!(peer_ping_interval_for(7), Duration::from_secs(30));
+        // O helper pub(crate) usado pelo transporte corresponde ao ativo.
+        assert_eq!(peer_ping_interval(), Duration::from_secs(30));
     }
 }
