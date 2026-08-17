@@ -225,12 +225,52 @@ mod tests {
             .add_peer(
                 "127.0.0.1:5000".parse().unwrap(),
                 id.clone(),
+                "sess-1".into(),
                 "phone".into(),
                 tx,
             )
             .await;
         assert_eq!(state.peer_count().await, 1);
-        state.remove_peer(&id).await;
+        state.remove_peer(&id, "sess-1").await;
+        assert_eq!(state.peer_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn reconnect_same_device_keeps_successor() {
+        let (state, _rx) = test_state();
+        let (tx_old, _) = mpsc::channel(10);
+        let (tx_new, _) = mpsc::channel(10);
+        let id = DeviceId::new();
+        state
+            .add_peer(
+                "1.1.1.1:1".parse().unwrap(),
+                id.clone(),
+                "old".into(),
+                "phone".into(),
+                tx_old,
+            )
+            .await;
+        state
+            .add_peer(
+                "2.2.2.2:2".parse().unwrap(),
+                id.clone(),
+                "new".into(),
+                "phone".into(),
+                tx_new,
+            )
+            .await;
+        assert_eq!(state.peer_count().await, 1, "sucessor substitui a entrada");
+
+        assert!(
+            state.remove_peer(&id, "old").await.is_none(),
+            "detach da sessão antiga não remove o sucessor"
+        );
+        assert_eq!(state.peer_count().await, 1);
+
+        assert!(
+            state.remove_peer(&id, "new").await.is_some(),
+            "detach do sucessor remove a entrada"
+        );
         assert_eq!(state.peer_count().await, 0);
     }
 
@@ -242,10 +282,22 @@ mod tests {
         let id_a = DeviceId::new();
         let id_b = DeviceId::new();
         state
-            .add_peer("1.1.1.1:1".parse().unwrap(), id_a.clone(), "a".into(), tx_a)
+            .add_peer(
+                "1.1.1.1:1".parse().unwrap(),
+                id_a.clone(),
+                "sess-a".into(),
+                "a".into(),
+                tx_a,
+            )
             .await;
         state
-            .add_peer("2.2.2.2:2".parse().unwrap(), id_b.clone(), "b".into(), tx_b)
+            .add_peer(
+                "2.2.2.2:2".parse().unwrap(),
+                id_b.clone(),
+                "sess-b".into(),
+                "b".into(),
+                tx_b,
+            )
             .await;
 
         let msg = Message::ClipboardText {

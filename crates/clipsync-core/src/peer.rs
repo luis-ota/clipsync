@@ -105,4 +105,46 @@ mod tests {
         session.detach().await;
         assert_eq!(session.state.peer_count().await, 0);
     }
+
+    #[tokio::test]
+    async fn detach_old_session_keeps_successor() {
+        let (state, _rx) = ServerState::new(crate::server::ServerConfig::default());
+        let state = std::sync::Arc::new(state);
+        let id = DeviceId::new();
+
+        let (tx_old, _) = mpsc::channel(16);
+        let mut old = PeerSession::new(state.clone(), "127.0.0.1:1".parse().unwrap(), tx_old);
+        old.attach(id.clone(), "phone".into()).await;
+
+        // Reconexão do mesmo device: a nova sessão substitui a antiga.
+        let (tx_new, mut rx_new) = mpsc::channel(16);
+        let mut new = PeerSession::new(state.clone(), "127.0.0.1:2".parse().unwrap(), tx_new);
+        new.attach(id.clone(), "phone".into()).await;
+        assert_eq!(state.peer_count().await, 1);
+
+        // A sessão antiga fecha: o detach não pode remover o sucessor.
+        old.detach().await;
+        assert_eq!(
+            state.peer_count().await,
+            1,
+            "sucessor permanece no mapa após detach da sessão antiga"
+        );
+
+        // O sucessor continua recebendo broadcasts.
+        state
+            .broadcast_except(
+                Message::ClipboardText {
+                    mime: "text/plain".into(),
+                    content: "hi".into(),
+                    origin: DeviceId::new(),
+                    sha256: "abc".into(),
+                },
+                None,
+            )
+            .await;
+        assert!(
+            rx_new.try_recv().is_ok(),
+            "sucessor continua recebendo broadcast"
+        );
+    }
 }
