@@ -77,6 +77,10 @@ CLIENT                            SERVER
 5. O `device_id` recebido em `pair_ok` **deve** ser persistido pelo
    client (SharedPreferences) e enviado em `hello` nas próximas
    conexões.
+6. Se um `device_id` já tem uma sessão ativa e reconecta, a **nova**
+   sessão substitui a antiga. A sessão antiga recebe `error` com
+   código `superseded` e para de receber broadcasts; o client deve
+   fechar a conexão ao recebê-lo.
 
 ## Mensagens de clipboard
 

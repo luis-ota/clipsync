@@ -15,6 +15,8 @@ use crate::state::SharedState;
 pub struct PeerSession {
     pub state: SharedState,
     pub addr: SocketAddr,
+    /// ID único desta sessão de conexão.
+    pub session_id: String,
     /// Dispositivo atribuído (após pareamento).
     pub device_id: Option<DeviceId>,
     /// Nome amigável do peer.
@@ -27,6 +29,7 @@ impl PeerSession {
         Self {
             state,
             addr,
+            session_id: uuid::Uuid::new_v4().to_string(),
             device_id: None,
             name: String::new(),
             tx,
@@ -34,19 +37,30 @@ impl PeerSession {
     }
 
     /// Associa um device à sessão (após pareamento ou trust) e
-    /// registra o peer no estado compartilhado.
+    /// registra o peer no estado compartilhado. Se o device já tem
+    /// outra sessão ativa, ela é substituída (e notificada como
+    /// `superseded`) — nunca removida por este detach.
     pub async fn attach(&mut self, device_id: DeviceId, name: String) {
         self.device_id = Some(device_id.clone());
         self.name = name.clone();
         self.state
-            .add_peer(self.addr, device_id, name, self.tx.clone())
+            .add_peer(
+                self.addr,
+                device_id,
+                self.session_id.clone(),
+                name,
+                self.tx.clone(),
+            )
             .await;
     }
 
     /// Desregistra o peer do estado compartilhado (fim da conexão).
+    /// Compare-and-swap pela `session_id`: se o mapa já aponta para um
+    /// sucessor (mesmo `device_id`, sessão nova), a entrada não é
+    /// removida.
     pub async fn detach(&mut self) {
         if let Some(id) = self.device_id.take() {
-            self.state.remove_peer(&id).await;
+            self.state.remove_peer(&id, &self.session_id).await;
         }
     }
 
