@@ -166,18 +166,24 @@ pub enum Message {
     /// Primeira mensagem enviada pelo cliente ao se conectar.
     Hello { v: u16, device: DeviceInfo },
 
-    /// Servidor responde com um PIN de 6 dígitos para pareamento.
+    /// Servidor responde com um desafio de pareamento. O PIN de 6
+    /// dígitos é exibido localmente no daemon e nunca viaja no wire.
     PairChallenge {
-        /// PIN numérico, string de 6 dígitos.
-        code: String,
+        /// Identificador do desafio; ecoado em `pair_submit`.
+        challenge_id: String,
         /// Unix timestamp (segundos) de expiração.
         expires_at: i64,
         /// Nonce aleatório que o cliente deve ecoar em `pair_submit`.
         nonce: String,
     },
 
-    /// Cliente submete o PIN digitado.
-    PairSubmit { code: String, nonce: String },
+    /// Cliente submete o PIN digitado (exibido no daemon).
+    PairSubmit {
+        challenge_id: String,
+        /// PIN numérico de 6 dígitos digitado pelo usuário.
+        code: String,
+        nonce: String,
+    },
 
     /// Servidor confirma pareamento e atribui um device_id estável.
     PairOk {
@@ -314,5 +320,34 @@ mod tests {
         let s = serde_json::to_string(&id).unwrap();
         let back: DeviceId = serde_json::from_str(&s).unwrap();
         assert_eq!(id, back);
+    }
+
+    #[test]
+    fn pair_challenge_never_carries_pin() {
+        let m = Message::PairChallenge {
+            challenge_id: "ch-1".into(),
+            expires_at: 1_723_000_000,
+            nonce: "a1b2".into(),
+        };
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["type"], "pair_challenge");
+        assert_eq!(json["challenge_id"], "ch-1");
+        assert!(
+            json.get("code").is_none(),
+            "PIN não pode viajar na resposta do challenge"
+        );
+    }
+
+    #[test]
+    fn pair_submit_roundtrips_with_pin() {
+        let m = Message::PairSubmit {
+            challenge_id: "ch-1".into(),
+            code: "834921".into(),
+            nonce: "a1b2".into(),
+        };
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["type"], "pair_submit");
+        assert_eq!(json["code"], "834921");
+        assert_eq!(json["challenge_id"], "ch-1");
     }
 }
