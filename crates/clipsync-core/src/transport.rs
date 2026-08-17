@@ -405,6 +405,8 @@ fn peer_snapshot(msg: &Message) -> crate::clipboard::ClipboardEvent {
                 mime: crate::clipboard::MIME_TEXT.to_owned(),
                 bytes: content.as_bytes().to_vec(),
                 sha256: sha_of(msg),
+                html: None,
+                html_sha256: None,
             }),
         ),
         Message::ClipboardImage { data_b64, mime, .. } => {
@@ -415,16 +417,31 @@ fn peer_snapshot(msg: &Message) -> crate::clipboard::ClipboardEvent {
                         .decode(data_b64)
                         .unwrap_or_default(),
                     sha256: sha_of(msg),
+                    html: None,
+                    html_sha256: None,
                 },
             ))
         }
-        Message::ClipboardHtml { html, .. } => crate::clipboard::ClipboardEvent::Changed(Box::new(
-            crate::clipboard::ClipboardSnapshot {
-                mime: crate::clipboard::MIME_HTML.to_owned(),
-                bytes: html.as_bytes().to_vec(),
-                sha256: sha_of(msg),
-            },
-        )),
+        Message::ClipboardHtml { html, alt, .. } => {
+            // `bytes` carrega o texto plain alternativo (`alt`) quando
+            // disponível, servindo de fallback para backends que não
+            // suportam escrita seletiva de text/html. `sha256` é o
+            // hash do HTML (usado para anti-eco da escrita rich text).
+            let html_sha = sha_of(msg);
+            let bytes = alt
+                .as_deref()
+                .map(|a| a.as_bytes().to_vec())
+                .unwrap_or_else(|| html.as_bytes().to_vec());
+            crate::clipboard::ClipboardEvent::Changed(Box::new(
+                crate::clipboard::ClipboardSnapshot {
+                    mime: crate::clipboard::MIME_HTML.to_owned(),
+                    bytes,
+                    sha256: html_sha.clone(),
+                    html: Some(html.clone()),
+                    html_sha256: Some(html_sha),
+                },
+            ))
+        }
         _ => unreachable!("apenas clipboard messages"),
     }
 }

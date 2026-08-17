@@ -95,15 +95,9 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
         while let Some(evt) = rx.recv().await {
             match evt {
                 ClipboardEvent::Changed(snap) => {
-                    let msg = match &snap.mime[..] {
-                        m if m.starts_with("text/") && sync_text => Message::ClipboardText {
-                            mime: m.to_owned(),
-                            content: String::from_utf8_lossy(&snap.bytes).into_owned(),
-                            origin: DeviceId::new(),
-                            sha256: snap.sha256,
-                        },
-                        m if m.starts_with("image/") && sync_images => Message::ClipboardImage {
-                            mime: m.to_owned(),
+                    let msg = if snap.mime.starts_with("image/") && sync_images {
+                        Message::ClipboardImage {
+                            mime: snap.mime.clone(),
                             data_b64: {
                                 use base64::Engine;
                                 base64::engine::general_purpose::STANDARD.encode(&snap.bytes)
@@ -112,14 +106,30 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
                             height: None,
                             sha256: snap.sha256,
                             origin: DeviceId::new(),
-                        },
-                        m if m == MIME_HTML && sync_html => Message::ClipboardHtml {
-                            html: String::from_utf8_lossy(&snap.bytes).into_owned(),
-                            alt: None,
-                            sha256: snap.sha256,
+                        }
+                    } else if sync_html && snap.html.is_some() {
+                        // Rich text: envia HTML com texto plain como `alt`
+                        // (fallback para peers que não suportam text/html).
+                        let html = snap.html.clone().unwrap();
+                        let alt = snap.text().map(|t| t.to_owned());
+                        Message::ClipboardHtml {
+                            sha256: snap
+                                .html_sha256
+                                .clone()
+                                .unwrap_or_else(|| snap.sha256.clone()),
+                            html,
+                            alt,
                             origin: DeviceId::new(),
-                        },
-                        _ => continue,
+                        }
+                    } else if snap.mime.starts_with("text/") && sync_text {
+                        Message::ClipboardText {
+                            mime: snap.mime.clone(),
+                            content: String::from_utf8_lossy(&snap.bytes).into_owned(),
+                            origin: DeviceId::new(),
+                            sha256: snap.sha256,
+                        }
+                    } else {
+                        continue;
                     };
                     state_watcher.broadcast_except(msg, None).await;
                 }
@@ -136,7 +146,16 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
         while let Some(evt) = peer_events_rx.recv().await {
             match evt {
                 ClipboardEvent::Changed(snap) => {
-                    if snap.mime.starts_with("text/") {
+                    if snap.mime == MIME_HTML && snap.html.is_some() {
+                        // Rich text: grava HTML no clipboard. Se falhar
+                        // (ex: backend sem suporte a MIME seletivo),
+                        // cai para texto plain (`alt` em snap.bytes).
+                        let html = snap.html.clone().unwrap();
+                        if cm.write_html(&html, WriteOrigin::Remote).is_err() {
+                            let fallback = snap.text().unwrap_or(&html);
+                            let _ = cm.write_text(fallback, WriteOrigin::Remote);
+                        }
+                    } else if snap.mime.starts_with("text/") {
                         let _ = cm.write_text(snap.text().unwrap_or_default(), WriteOrigin::Remote);
                     } else if snap.mime.starts_with("image/") {
                         let _ = cm.write_image(&snap.mime, &snap.bytes, WriteOrigin::Remote);

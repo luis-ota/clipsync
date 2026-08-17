@@ -122,10 +122,23 @@ Limite v0.1: 25 MB por imagem (configurável em `max_image_bytes`).
   "type": "clipboard_html",
   "v": 1,
   "html": "<b>negrito</b>",
+  "alt": "negrito",
   "origin": "uuid-do-device",
   "sha256": "hex-64-chars"
 }
 ```
+
+| Campo     | Tipo   | Descrição                                              |
+|-----------|--------|--------------------------------------------------------|
+| `html`    | string | Conteúdo rich text (text/html).                        |
+| `alt`     | string \| null | Texto plain alternativo (fallback para peers/clients que não suportam `text/html`). Opcional; `null` quando só há HTML disponível. |
+| `origin`  | string | Device que originou o conteúdo (anti-eco).             |
+| `sha256`  | string | SHA-256 (hex) do conteúdo de `html` (dedup + anti-eco).|
+
+> O daemon lê `text/html` via `wl-paste --type text/html` (Wayland) e
+> grava via `wl-copy -t text/html`. Em X11/headless o HTML não é lido
+> (apenas texto plain). Habilitado pela config `clipboard.sync_html`
+> (default `false`).
 
 ## Keepalive
 
