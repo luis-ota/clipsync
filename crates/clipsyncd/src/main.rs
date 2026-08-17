@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use tokio::signal;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use clipsync_core::clipboard::{ClipboardEvent, ClipboardManager, WriteOrigin, MIME_HTML};
@@ -16,6 +17,8 @@ use clipsync_core::discovery::Discovery;
 use clipsync_core::protocol::{DeviceId, Message};
 use clipsync_core::server::{Server, ServerConfig};
 use clipsync_core::state::ServerState;
+
+mod tray;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -32,7 +35,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Inicia o daemon (modo foreground com logs e PIN).
-    Run,
+    Run {
+        /// Desativa o ícone de bandeja (modo headless).
+        /// Também pode ser ativado via CLIPSYNC_NO_TRAY=1.
+        #[arg(long, env = "CLIPSYNC_NO_TRAY")]
+        no_tray: bool,
+    },
     /// Mostra o PIN de pareamento atual.
     ShowPin,
     /// Lista devices pareados e confiados.
@@ -56,7 +64,7 @@ enum Commands {
 // ---------------------------------------------------------------------------
 
 /// Roda o daemon: server + watcher de clipboard + mDNS.
-async fn cmd_run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error::Error>> {
     let server_config = ServerConfig::from_config(&config);
     let (state, mut peer_events_rx) = ServerState::new(server_config.clone());
     let state = std::sync::Arc::new(state);
@@ -142,17 +150,82 @@ async fn cmd_run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Server
-    let server = Server::new(server_config, state);
+    let server = Server::new(server_config, state.clone());
     info!(
         name = %server.config.name,
         bind = %server.config.bind,
         "clipsyncd em execução"
     );
 
+    // Ícone de bandeja (opcional). Iniciado DEPOIS do server estar de pé
+    // para que o daemon funcione mesmo em ambientes sem D-Bus/SNI host.
+    // Falhas no tray NUNCA derrubam o daemon.
+    let tray_handle = if no_tray {
+        info!("tray desativado (--no-tray)");
+        None
+    } else {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<tray::TrayCommand>(16);
+        match tray::spawn(cmd_tx).await {
+            Some(handle) => {
+                let handle_for_updater = handle.clone();
+                let state_for_updater = state.clone();
+                // Atualiza periodicamente o tooltip/menu do tray com
+                // PIN e contagem de peers.
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(Duration::from_secs(2));
+                    ticker.tick().await; // primeiro tick imediato
+                    loop {
+                        ticker.tick().await;
+                        let peer_count = state_for_updater.peer_count().await;
+                        let pin = state_for_updater.pairing.lock().await.active_pin();
+                        let status = tray::TrayStatus {
+                            peer_count,
+                            pin,
+                            state: "rodando".to_string(),
+                        };
+                        tray::update(&handle_for_updater, status).await;
+                    }
+                });
+
+                // Lida com comandos vindos do menu do tray.
+                let state_for_cmds = state.clone();
+                tokio::spawn(async move {
+                    while let Some(cmd) = cmd_rx.recv().await {
+                        match cmd {
+                            tray::TrayCommand::ShowPin => {
+                                let pin = state_for_cmds.pairing.lock().await.active_pin();
+                                tray::show_pin(pin).await;
+                            }
+                            tray::TrayCommand::ListPeers => {
+                                let peers = state_for_cmds.peer_list().await;
+                                let n = peers.len();
+                                info!(peer_count = n, "peers conectados:");
+                                for p in &peers {
+                                    info!(name = %p.name, addr = %p.addr, "  peer");
+                                }
+                                tray::show_peers(n).await;
+                            }
+                            tray::TrayCommand::Quit => {
+                                info!("encerrando via tray");
+                                state_for_cmds.shutdown.cancel();
+                            }
+                        }
+                    }
+                });
+
+                Some(handle)
+            }
+            None => None,
+        }
+    };
+
     tokio::select! {
         res = server.run() => {
             if let Err(e) = res {
                 eprintln!("Erro do servidor: {e}");
+                if let Some(h) = tray_handle.as_ref() {
+                    tray::shutdown(h);
+                }
                 return Err(e.to_string().into());
             }
         }
@@ -162,8 +235,14 @@ async fn cmd_run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             info!("encerrando");
         }
+        _ = state.shutdown.cancelled() => {
+            info!("encerrando (solicitado pelo tray)");
+        }
     }
 
+    if let Some(h) = tray_handle.as_ref() {
+        tray::shutdown(h);
+    }
     let _ = discovery;
     Ok(())
 }
@@ -263,9 +342,9 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Run) => {
+        Some(Commands::Run { no_tray }) => {
             let config = Config::load_or_default(None).unwrap_or_default();
-            if let Err(e) = cmd_run(config).await {
+            if let Err(e) = cmd_run(config, no_tray).await {
                 eprintln!("Erro: {e}");
                 std::process::exit(1);
             }
@@ -288,7 +367,7 @@ async fn main() {
             }
         }
         None => {
-            cmd_run(Config::default()).await.ok();
+            cmd_run(Config::default(), false).await.ok();
         }
     }
 }
