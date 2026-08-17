@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use clipsync_core::clipboard::{ClipboardEvent, ClipboardManager, WriteOrigin, MIME_HTML};
 use clipsync_core::config::Config;
 use clipsync_core::discovery::Discovery;
-use clipsync_core::protocol::{DeviceId, Message};
+use clipsync_core::protocol::Message;
 use clipsync_core::server::{Server, ServerConfig};
 use clipsync_core::state::ServerState;
 
@@ -72,6 +72,10 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     // Clipboard manager
     let clipboard = ClipboardManager::new()?;
     clipboard.check_tools().ok();
+    // O caminho peer→local compartilha o rastro de escrita própria com
+    // o watcher: sem isso, o watcher veria a própria escrita como
+    // mudança externa e ecoaria para todos os peers.
+    let clipboard_writer = clipboard.share_self_write();
 
     // mDNS announce
     let discovery = Discovery::new()?;
@@ -85,6 +89,10 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     let _ = discovery.announce(&config.server.name, port);
 
     // Watcher: clipboard local → peers (broadcast)
+    // `origin` é o device_id persistido do daemon (estável por sessão),
+    // nunca um UUID novo por frame: o dedup last_origin+last_seq dos
+    // clients só funciona com origin estável.
+    let daemon_id = config.server.device_id.clone().unwrap_or_default();
     let watcher_rx = clipboard.watch(Duration::from_millis(config.clipboard.poll_interval_ms));
     let state_watcher = state.clone();
     let sync_text = config.clipboard.sync_text;
@@ -105,7 +113,7 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
                             width: None,
                             height: None,
                             sha256: snap.sha256,
-                            origin: DeviceId::new(),
+                            origin: daemon_id.clone(),
                         }
                     } else if sync_html && snap.html.is_some() {
                         // Rich text: envia HTML com texto plain como `alt`
@@ -119,13 +127,13 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
                                 .unwrap_or_else(|| snap.sha256.clone()),
                             html,
                             alt,
-                            origin: DeviceId::new(),
+                            origin: daemon_id.clone(),
                         }
                     } else if snap.mime.starts_with("text/") && sync_text {
                         Message::ClipboardText {
                             mime: snap.mime.clone(),
                             content: String::from_utf8_lossy(&snap.bytes).into_owned(),
-                            origin: DeviceId::new(),
+                            origin: daemon_id.clone(),
                             sha256: snap.sha256,
                         }
                     } else {
@@ -142,7 +150,7 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
 
     // Peers → clipboard local (grava com origem Remote para anti-eco)
     tokio::spawn(async move {
-        let mut cm = ClipboardManager::new().unwrap_or_else(|_| ClipboardManager::headless());
+        let mut cm = clipboard_writer;
         while let Some(evt) = peer_events_rx.recv().await {
             match evt {
                 ClipboardEvent::Changed(snap) => {
