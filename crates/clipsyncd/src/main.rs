@@ -303,6 +303,81 @@ fn cmd_show_pin() {
     }
 }
 
+/// Path do arquivo de devices confiados, ou encerra com erro.
+fn trusted_path_or_exit() -> std::path::PathBuf {
+    match clipsync_core::config::trusted_devices_path() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Erro localizando trusted devices: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Lista os devices confiados persistidos em `path` (trusted.toml).
+/// Opera offline, sem precisar do daemon rodando.
+fn list_trusted(path: &std::path::Path) -> clipsync_core::Result<()> {
+    let store = clipsync_core::pairing::TrustedStore::load(path)?;
+    if store.devices.is_empty() {
+        println!("Nenhum device pareado ainda.");
+        return Ok(());
+    }
+    let devices = store.trusted_devices();
+    println!("Devices confiados ({}):", devices.len());
+    for d in devices {
+        println!("  {}", d.name);
+        println!("    ID: {}", d.id);
+        println!("    Tipo: {}", d.kind);
+        println!("    Último visto: {}", format_last_seen(d.last_seen));
+    }
+    Ok(())
+}
+
+/// Remove o device `device_id` do store persistido em `path`.
+/// Retorna true se o device existia e foi removido (e salvo em disco).
+fn untrust_device(path: &std::path::Path, device_id: &str) -> clipsync_core::Result<bool> {
+    let mut store = clipsync_core::pairing::TrustedStore::load(path)?;
+    if store.remove(device_id) {
+        store.save(path)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Formata um Unix timestamp como data/hora UTC legível.
+fn format_last_seen(ts: i64) -> String {
+    if ts == 0 {
+        return "nunca".into();
+    }
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| ts.to_string())
+}
+
+fn cmd_list_peers() {
+    let path = trusted_path_or_exit();
+    if let Err(e) = list_trusted(&path) {
+        eprintln!("Erro lendo trusted devices: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn cmd_untrust(device: &str) {
+    let path = trusted_path_or_exit();
+    match untrust_device(&path, device) {
+        Ok(true) => println!("Device removido: {device}"),
+        Ok(false) => {
+            eprintln!("Device não encontrado: {device}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Erro removendo device: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn cmd_show_address() {
     println!("Serviço mDNS: _clipsync._tcp.local");
     println!("Porta padrão: 8765 (configurável em config.toml)");
@@ -369,14 +444,8 @@ async fn main() {
             }
         }
         Some(Commands::ShowPin) => cmd_show_pin(),
-        Some(Commands::ListPeers) => {
-            eprintln!("ListPeers requer estado do daemon; disponível em versão futura (v0.2)");
-        }
-        Some(Commands::Untrust { device }) => {
-            eprintln!(
-                "Untrust ({device}) requer estado do daemon; disponível em versão futura (v0.2)"
-            );
-        }
+        Some(Commands::ListPeers) => cmd_list_peers(),
+        Some(Commands::Untrust { device }) => cmd_untrust(&device),
         Some(Commands::ShowAddress) => cmd_show_address(),
         Some(Commands::ServiceInstall) => cmd_service_install(),
         Some(Commands::Discover { timeout }) => {
@@ -388,5 +457,63 @@ async fn main() {
         None => {
             cmd_run(Config::default(), false).await.ok();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipsync_core::pairing::{TrustedDevice, TrustedStore};
+    use clipsync_core::DeviceId;
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("clipsync-cli-{name}-{}", std::process::id()))
+    }
+
+    fn sample_store() -> TrustedStore {
+        TrustedStore {
+            devices: vec![TrustedDevice {
+                id: DeviceId::from("abc-123"),
+                name: "Pixel 8".into(),
+                kind: "android".into(),
+                last_seen: 1_700_000_000,
+                paired_at: 1_690_000_000,
+                trusted: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn untrust_removes_device_from_file() {
+        let path = temp_path("untrust");
+        let _ = std::fs::remove_file(&path);
+        sample_store().save(&path).unwrap();
+        assert!(untrust_device(&path, "abc-123").unwrap());
+        assert!(TrustedStore::load(&path).unwrap().devices.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn untrust_missing_device_returns_false() {
+        let path = temp_path("untrust-missing");
+        let _ = std::fs::remove_file(&path);
+        sample_store().save(&path).unwrap();
+        assert!(!untrust_device(&path, "nonexistent").unwrap());
+        assert_eq!(TrustedStore::load(&path).unwrap().devices.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn untrust_without_file_returns_false() {
+        let path = temp_path("untrust-no-file");
+        let _ = std::fs::remove_file(&path);
+        assert!(!untrust_device(&path, "abc-123").unwrap());
+    }
+
+    #[test]
+    fn list_trusted_empty_store_is_empty() {
+        let path = temp_path("list-empty");
+        let _ = std::fs::remove_file(&path);
+        assert!(list_trusted(&path).is_ok());
     }
 }

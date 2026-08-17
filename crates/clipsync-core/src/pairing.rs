@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::error::Result;
@@ -35,7 +36,7 @@ pub struct PairChallenge {
 }
 
 /// Registro de um device pareado e confiado.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustedDevice {
     pub id: DeviceId,
     pub name: String,
@@ -46,6 +47,64 @@ pub struct TrustedDevice {
     pub paired_at: i64,
     /// Se true, conexões deste device são aceitas sem PIN.
     pub trusted: bool,
+}
+
+/// Store persistido de devices confiados (`trusted.toml`).
+///
+/// Formato: TOML com um array `devices` de [`TrustedDevice`]. O daemon
+/// ainda mantém os confiados em memória; este store é o formato de
+/// intercâmbio usado pelas ferramentas offline do CLI (`list-peers`,
+/// `untrust`) e pode ser usado pelo daemon para persistir ao encerrar.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrustedStore {
+    pub devices: Vec<TrustedDevice>,
+}
+
+impl TrustedStore {
+    /// Carrega o store de um path TOML. Arquivo ausente => store vazio.
+    pub fn load(path: &std::path::Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| crate::Error::Config(format!("falha lendo {path:?}: {e}")))?;
+        toml::from_str(&contents)
+            .map_err(|e| crate::Error::Config(format!("TOML inválido em {path:?}: {e}")))
+    }
+
+    /// Carrega do path padrão de trusted devices.
+    pub fn load_default() -> Result<Self> {
+        Self::load(&crate::config::trusted_devices_path()?)
+    }
+
+    /// Salva o store em um path TOML (cria os diretórios pais).
+    pub fn save(&self, path: &std::path::Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| crate::Error::Config(format!("falha criando {parent:?}: {e}")))?;
+        }
+        let toml_str = toml::to_string_pretty(self)
+            .map_err(|e| crate::Error::Config(format!("falha serializando trusted: {e}")))?;
+        std::fs::write(path, toml_str)
+            .map_err(|e| crate::Error::Config(format!("falha salvando {path:?}: {e}")))?;
+        Ok(())
+    }
+
+    /// Lista os devices confiados ordenados por `last_seen`
+    /// (mais recente primeiro), espelhando [`PairingManager::trusted_devices`].
+    pub fn trusted_devices(&self) -> Vec<&TrustedDevice> {
+        let mut v: Vec<_> = self.devices.iter().collect();
+        v.sort_by_key(|t| std::cmp::Reverse(t.last_seen));
+        v
+    }
+
+    /// Remove o device com o id dado. Retorna true se algum foi removido.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let before = self.devices.len();
+        self.devices.retain(|d| d.id.as_str() != id);
+        self.devices.len() != before
+    }
 }
 
 /// Gerencia desafios de pareamento ativos e o store de confiados.
@@ -250,5 +309,80 @@ mod tests {
         let id = pm.trust("my-phone", "android");
         assert!(pm.is_trusted(&id));
         assert_eq!(pm.trusted_devices().len(), 1);
+    }
+
+    #[test]
+    fn trusted_store_roundtrips_toml() {
+        let dir = std::env::temp_dir().join(format!("clipsync-pairing-{}", std::process::id()));
+        let path = dir.join("trusted.toml");
+        let _ = std::fs::remove_file(&path);
+        let store = TrustedStore {
+            devices: vec![TrustedDevice {
+                id: DeviceId::from("abc-123"),
+                name: "Pixel 8".into(),
+                kind: "android".into(),
+                last_seen: 1_700_000_000,
+                paired_at: 1_690_000_000,
+                trusted: true,
+            }],
+        };
+        store.save(&path).unwrap();
+        let loaded = TrustedStore::load(&path).unwrap();
+        assert_eq!(loaded, store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn trusted_store_load_missing_is_empty() {
+        let path = std::env::temp_dir().join(format!("trusted-missing-{}", std::process::id()));
+        let store = TrustedStore::load(&path).unwrap();
+        assert!(store.devices.is_empty());
+    }
+
+    #[test]
+    fn trusted_store_remove() {
+        let mut store = TrustedStore {
+            devices: vec![TrustedDevice {
+                id: DeviceId::from("abc"),
+                name: "Pixel 8".into(),
+                kind: "android".into(),
+                last_seen: 1,
+                paired_at: 1,
+                trusted: true,
+            }],
+        };
+        assert!(store.remove("abc"));
+        assert!(store.devices.is_empty());
+        assert!(!store.remove("abc"));
+    }
+
+    #[test]
+    fn trusted_store_sorted_by_last_seen_desc() {
+        let store = TrustedStore {
+            devices: vec![
+                TrustedDevice {
+                    id: DeviceId::from("old"),
+                    name: "old".into(),
+                    kind: "android".into(),
+                    last_seen: 1,
+                    paired_at: 1,
+                    trusted: true,
+                },
+                TrustedDevice {
+                    id: DeviceId::from("new"),
+                    name: "new".into(),
+                    kind: "android".into(),
+                    last_seen: 3,
+                    paired_at: 1,
+                    trusted: true,
+                },
+            ],
+        };
+        let ids: Vec<_> = store
+            .trusted_devices()
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["new", "old"]);
     }
 }
