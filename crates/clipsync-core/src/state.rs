@@ -26,6 +26,9 @@ const PEER_PING_INTERVAL: Duration = Duration::from_secs(30);
 pub struct PeerHandle {
     pub addr: SocketAddr,
     pub device_id: DeviceId,
+    /// ID único desta sessão de conexão. Distingue handles do mesmo
+    /// `device_id`; usado no compare-and-swap do `remove_peer`.
+    pub session_id: String,
     pub name: String,
     pub connected_at: i64,
     /// Canal para enviar mensagens ao peer. Enviar = colocar na fila
@@ -73,30 +76,61 @@ impl ServerState {
         (state, rx)
     }
 
-    /// Registra um peer conectado.
+    /// Registra um peer conectado. Se o `device_id` já tem uma sessão
+    /// ativa com outra `session_id`, a sessão nova substitui a antiga
+    /// no mapa e a antiga é notificada via `error` (código
+    /// `superseded`). A sessão antiga, ao ser encerrada, não remove a
+    /// entrada do sucessor: `remove_peer` faz compare-and-swap pela
+    /// `session_id`.
     pub async fn add_peer(
         &self,
         addr: SocketAddr,
         device_id: DeviceId,
+        session_id: String,
         name: String,
         tx: mpsc::Sender<Message>,
     ) {
         let handle = PeerHandle {
             addr,
             device_id: device_id.clone(),
+            session_id: session_id.clone(),
             name,
             connected_at: chrono::Utc::now().timestamp(),
             tx,
         };
-        self.peers.write().await.insert(device_id.clone(), handle);
+        let mut map = self.peers.write().await;
+        if let Some(old) = map.get(&device_id) {
+            if old.session_id != session_id {
+                warn!(
+                    peer = %old.addr,
+                    device = %device_id,
+                    "device reconectado com nova sessão; notificando a antiga"
+                );
+                old.send(Message::Error {
+                    code: "superseded".into(),
+                    message: "sessão substituída por nova conexão deste device".into(),
+                });
+            }
+        }
+        map.insert(device_id.clone(), handle);
         info!(peer = %addr, device = %device_id, "peer conectado");
     }
 
-    /// Remove um peer da lista de ativos.
-    pub async fn remove_peer(&self, device_id: &DeviceId) -> Option<PeerHandle> {
-        let removed = self.peers.write().await.remove(device_id);
+    /// Remove um peer da lista de ativos. Compare-and-swap: só remove
+    /// se a entrada do mapa ainda pertence a esta sessão (`session_id`).
+    /// Assim, quando um device reconecta e a sessão antiga é substituída,
+    /// o detach da sessão antiga não remove o handle do sucessor.
+    pub async fn remove_peer(&self, device_id: &DeviceId, session_id: &str) -> Option<PeerHandle> {
+        let mut map = self.peers.write().await;
+        let removed = if matches!(map.get(device_id), Some(h) if h.session_id == session_id) {
+            map.remove(device_id)
+        } else {
+            None
+        };
         if let Some(handle) = &removed {
             info!(peer = %handle.addr, device = %device_id, "peer desconectado");
+        } else {
+            debug!(device = %device_id, "detach ignorado: sessão já não está ativa");
         }
         removed
     }
@@ -191,12 +225,52 @@ mod tests {
             .add_peer(
                 "127.0.0.1:5000".parse().unwrap(),
                 id.clone(),
+                "sess-1".into(),
                 "phone".into(),
                 tx,
             )
             .await;
         assert_eq!(state.peer_count().await, 1);
-        state.remove_peer(&id).await;
+        state.remove_peer(&id, "sess-1").await;
+        assert_eq!(state.peer_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn reconnect_same_device_keeps_successor() {
+        let (state, _rx) = test_state();
+        let (tx_old, _) = mpsc::channel(10);
+        let (tx_new, _) = mpsc::channel(10);
+        let id = DeviceId::new();
+        state
+            .add_peer(
+                "1.1.1.1:1".parse().unwrap(),
+                id.clone(),
+                "old".into(),
+                "phone".into(),
+                tx_old,
+            )
+            .await;
+        state
+            .add_peer(
+                "2.2.2.2:2".parse().unwrap(),
+                id.clone(),
+                "new".into(),
+                "phone".into(),
+                tx_new,
+            )
+            .await;
+        assert_eq!(state.peer_count().await, 1, "sucessor substitui a entrada");
+
+        assert!(
+            state.remove_peer(&id, "old").await.is_none(),
+            "detach da sessão antiga não remove o sucessor"
+        );
+        assert_eq!(state.peer_count().await, 1);
+
+        assert!(
+            state.remove_peer(&id, "new").await.is_some(),
+            "detach do sucessor remove a entrada"
+        );
         assert_eq!(state.peer_count().await, 0);
     }
 
@@ -208,10 +282,22 @@ mod tests {
         let id_a = DeviceId::new();
         let id_b = DeviceId::new();
         state
-            .add_peer("1.1.1.1:1".parse().unwrap(), id_a.clone(), "a".into(), tx_a)
+            .add_peer(
+                "1.1.1.1:1".parse().unwrap(),
+                id_a.clone(),
+                "sess-a".into(),
+                "a".into(),
+                tx_a,
+            )
             .await;
         state
-            .add_peer("2.2.2.2:2".parse().unwrap(), id_b.clone(), "b".into(), tx_b)
+            .add_peer(
+                "2.2.2.2:2".parse().unwrap(),
+                id_b.clone(),
+                "sess-b".into(),
+                "b".into(),
+                tx_b,
+            )
             .await;
 
         let msg = Message::ClipboardText {
