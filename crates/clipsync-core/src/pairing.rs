@@ -175,6 +175,20 @@ impl PairingManager {
     pub fn untrust(&mut self, id: &DeviceId) -> bool {
         self.trusted.remove(id).is_some()
     }
+
+    /// Retorna o PIN de um desafio ativo (não expirado), se houver.
+    ///
+    /// Acessor mínimo exposto para o ícone de bandeja do `clipsyncd`
+    /// exibir o PIN de pareamento atual sem acessar internos. Não há
+    /// um "PIN corrente" global: o PIN existe apenas enquanto um
+    /// dispositivo não-confiado mantém um desafio aberto.
+    pub fn active_pin(&self) -> Option<String> {
+        self.challenges
+            .values()
+            .filter(|c| c.expires_at > Instant::now())
+            .map(|c| c.code.clone())
+            .next()
+    }
 }
 
 /// Gera um PIN de 6 dígitos com primeiro dígito != 0.

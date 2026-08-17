@@ -30,3 +30,11 @@ config.workspace = true
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+# Ícone de bandeja (StatusNotifierItem/AppIndicator). `ksni` é puro Rust
+# (zbus), sem puxar GTK — adequado a um daemon headless-first.
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
+# Notificações freedesktop (libnotify via D-Bus). Feature `z-with-tokio`
+# usa zbus puro Rust, sem libdbus-sys, para não exigir libs de sistema no CI.
+notify-rust = { version = "4", default-features = false, features = [
+    "z-with-tokio",
+] }
