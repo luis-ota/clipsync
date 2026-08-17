@@ -5,6 +5,9 @@
 //! imprime todo `clipboard_text` recebido e envia o texto digitado no
 //! stdin como `clipboard_text`.
 //!
+//! O PIN de pareamento é exibido pelo daemon (bandeja/tray) e digitado
+//! aqui no client — o desafio recebido nunca contém o PIN.
+//!
 //! Uso:
 //!   harness [URL] [--pin PIN] [--name NOME]
 //!
@@ -94,26 +97,26 @@ async fn run(cli: Cli) {
         Err(e) => exit_err("hello", &e),
     }
 
-    // pair_challenge: o PIN vem do próprio servidor.
-    let (code, nonce) = match recv(&mut ws).await {
+    // pair_challenge: o client só recebe o desafio (sem PIN). O PIN é
+    // exibido pelo daemon na bandeja/tray e digitado abaixo.
+    let (challenge_id, nonce) = match recv(&mut ws).await {
         Ok(Message::PairChallenge {
-            code,
+            challenge_id,
             nonce,
             expires_at,
-            ..
         }) => {
-            println!("PIN de pareamento recebido: {code} (expira em {expires_at})");
-            (code, nonce)
+            println!("Desafio de pareamento recebido (expira em {expires_at})");
+            (challenge_id, nonce)
         }
         Ok(other) => exit_err("pair_challenge", &format!("recebeu {}", other.type_name())),
         Err(e) => exit_err("pair_challenge", &e),
     };
 
-    // PIN: --pin, senão digita no terminal (Enter = usa o recebido).
+    // PIN: --pin ou digitado no terminal (exibido pelo daemon).
     let pin = match cli.pin {
         Some(p) => p,
         None => {
-            print!("Digite o PIN (Enter para usar o recebido): ");
+            print!("Digite o PIN exibido no daemon: ");
             let _ = std::io::Write::flush(&mut std::io::stdout());
             let mut line = String::new();
             if std::io::stdin().read_line(&mut line).is_err() {
@@ -121,15 +124,24 @@ async fn run(cli: Cli) {
             }
             let typed = line.trim().to_owned();
             if typed.is_empty() {
-                code
-            } else {
-                typed
+                eprintln!("PIN não informado; use --pin ou digite o PIN exibido no daemon");
+                std::process::exit(1);
             }
+            typed
         }
     };
 
     // pair_submit.
-    match send(&mut ws, Message::PairSubmit { code: pin, nonce }).await {
+    match send(
+        &mut ws,
+        Message::PairSubmit {
+            challenge_id,
+            code: pin,
+            nonce,
+        },
+    )
+    .await
+    {
         Ok(()) => {}
         Err(e) => exit_err("pair_submit", &e),
     }

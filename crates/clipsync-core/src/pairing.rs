@@ -1,9 +1,11 @@
 //! Pareamento por PIN (estilo "digite o código na tela").
 //!
-//! O servidor gera um PIN de 6 dígitos com expiração. O cliente
-//! submete o PIN junto com um nonce recebido no desafio. Se válido,
-//! o device é marcado como pareado e passa a ser confiado nas
-//! conexões seguintes.
+//! O servidor gera um PIN de 6 dígitos com expiração e o exibe
+//! localmente no daemon. O cliente submete o PIN digitado pelo usuário
+//! junto com o `challenge_id` e o nonce recebidos no desafio. O PIN
+//! nunca atravessa o fio: a resposta do desafio carrega apenas o
+//! `challenge_id`, o nonce e a expiração. Se válido, o device é marcado
+//! como pareado e passa a ser confiado nas conexões seguintes.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -23,7 +25,10 @@ pub const MAX_ATTEMPTS: u8 = 5;
 /// Um desafio de pareamento em andamento.
 #[derive(Debug, Clone)]
 pub struct PairChallenge {
-    /// PIN numérico de 6 dígitos (string).
+    /// Identificador do desafio, ecoado pelo cliente em `pair_submit`.
+    pub challenge_id: String,
+    /// PIN numérico de 6 dígitos (string). Nunca vai para o wire;
+    /// é exibido localmente no daemon.
     pub code: String,
     /// Nonce aleatório de 16 bytes hex, ecoado pelo cliente.
     pub nonce: String,
@@ -135,7 +140,9 @@ impl PairingManager {
 
         let code = generate_pin();
         let nonce = generate_nonce();
+        let challenge_id = uuid::Uuid::new_v4().to_string();
         let challenge = PairChallenge {
+            challenge_id: challenge_id.clone(),
             code: code.clone(),
             nonce: nonce.clone(),
             expires_at: Instant::now() + DEFAULT_PIN_TTL,
@@ -152,6 +159,7 @@ impl PairingManager {
     pub fn submit(
         &mut self,
         device_name: &str,
+        challenge_id: &str,
         nonce: &str,
         code: &str,
     ) -> Result<DeviceId, PairFailReason> {
@@ -163,6 +171,10 @@ impl PairingManager {
         if challenge.expires_at <= Instant::now() {
             self.challenges.remove(device_name);
             return Err(PairFailReason::Expired);
+        }
+
+        if challenge.challenge_id != challenge_id {
+            return Err(PairFailReason::InvalidCode);
         }
 
         if challenge.nonce != nonce {
@@ -290,7 +302,9 @@ mod tests {
     fn valid_pairing_flow() {
         let mut pm = PairingManager::new();
         let ch = pm.start_challenge("Pixel 8");
-        let device_id = pm.submit("Pixel 8", &ch.nonce, &ch.code).unwrap();
+        let device_id = pm
+            .submit("Pixel 8", &ch.challenge_id, &ch.nonce, &ch.code)
+            .unwrap();
         assert!(pm.is_trusted(&device_id));
     }
 
@@ -298,7 +312,7 @@ mod tests {
     fn wrong_code_consumes_attempt() {
         let mut pm = PairingManager::new();
         let ch = pm.start_challenge("Pixel 8");
-        let r = pm.submit("Pixel 8", &ch.nonce, "000000");
+        let r = pm.submit("Pixel 8", &ch.challenge_id, &ch.nonce, "000000");
         assert_eq!(r, Err(PairFailReason::InvalidCode));
         assert_eq!(pm.challenges["Pixel 8"].attempts_left, MAX_ATTEMPTS - 1);
     }
@@ -306,9 +320,18 @@ mod tests {
     #[test]
     fn wrong_nonce_rejected() {
         let mut pm = PairingManager::new();
-        pm.start_challenge("Pixel 8");
-        let r = pm.submit("Pixel 8", "deadbeef", "000000");
+        let ch = pm.start_challenge("Pixel 8");
+        let r = pm.submit("Pixel 8", &ch.challenge_id, "deadbeef", "000000");
         assert_eq!(r, Err(PairFailReason::InvalidCode));
+    }
+
+    #[test]
+    fn wrong_challenge_id_rejected() {
+        let mut pm = PairingManager::new();
+        let ch = pm.start_challenge("Pixel 8");
+        let r = pm.submit("Pixel 8", "ch-inexistente", &ch.nonce, &ch.code);
+        assert_eq!(r, Err(PairFailReason::InvalidCode));
+        assert_eq!(pm.challenges["Pixel 8"].attempts_left, MAX_ATTEMPTS);
     }
 
     #[test]
@@ -330,12 +353,17 @@ mod tests {
         assert_eq!(pm.active_pin().as_deref(), Some(second.code.as_str()));
 
         // O desafio anterior foi invalidado: submissão do PIN antigo falha.
-        let r = pm.submit("Pixel 8", &first.nonce, &first.code);
+        let r = pm.submit("Pixel 8", &first.challenge_id, &first.nonce, &first.code);
         assert_eq!(r, Err(PairFailReason::Expired));
 
         // O desafio atual permanece válido e pareia normalmente.
         let dev_id = pm
-            .submit("Galaxy S23", &second.nonce, &second.code)
+            .submit(
+                "Galaxy S23",
+                &second.challenge_id,
+                &second.nonce,
+                &second.code,
+            )
             .unwrap();
         assert!(pm.is_trusted(&dev_id));
         assert_eq!(pm.active_pin(), None);

@@ -190,14 +190,14 @@ impl ConnectionInner {
         R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
     {
         let device_name = device_info.name.clone();
-        let (code, nonce) = {
+        let (challenge_id, nonce) = {
             let mut pm = self.state.pairing.lock().await;
             let ch = pm.start_challenge(&device_name);
-            (ch.code.clone(), ch.nonce.clone())
+            (ch.challenge_id.clone(), ch.nonce.clone())
         };
-        info!(peer = %self.addr, device = %device_name, code = %code, "novo device: desafio de PIN enviado");
+        info!(peer = %self.addr, device = %device_name, "novo device: desafio de PIN enviado (PIN exibido no daemon)");
         session.send(Message::PairChallenge {
-            code,
+            challenge_id,
             expires_at: chrono::Utc::now().timestamp() + 120,
             nonce,
         });
@@ -209,13 +209,17 @@ impl ConnectionInner {
                     let msg: Message = serde_json::from_str(&text)
                         .map_err(|e| Error::Protocol(format!("JSON inválido: {e}")))?;
                     match msg {
-                        Message::PairSubmit { code, nonce } => {
-                            let result =
-                                self.state
-                                    .pairing
-                                    .lock()
-                                    .await
-                                    .submit(&device_name, &nonce, &code);
+                        Message::PairSubmit {
+                            code,
+                            nonce,
+                            challenge_id,
+                        } => {
+                            let result = self.state.pairing.lock().await.submit(
+                                &device_name,
+                                &challenge_id,
+                                &nonce,
+                                &code,
+                            );
                             match result {
                                 Ok(id) => {
                                     info!(peer = %self.addr, device = %id, "pareamento concluído");

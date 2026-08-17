@@ -14,8 +14,8 @@ um novo handshake.
 | Tipo               | Direção          | Descrição                        |
 |--------------------|------------------|----------------------------------|
 | `hello`            | client → server  | Identifica o device              |
-| `pair_challenge`   | server → client  | Envia PIN de 6 dígitos           |
-| `pair_submit`      | client → server  | Submete PIN + nonce              |
+| `pair_challenge`   | server → client  | Desafio (nonce + challenge_id); o PIN nunca viaja |
+| `pair_submit`      | client → server  | Submete PIN digitado + nonce + challenge_id |
 | `pair_ok`          | server → client  | Pareamento confirmado, device_id |
 | `pair_fail`        | server → client  | PIN inválido/expirado            |
 | `clipboard_text`   | ↔                | Sincroniza texto plain           |
@@ -45,14 +45,16 @@ CLIENT                            SERVER
   │                                 │
   │  ── se id é novo ──>            │
   │        {"type":"pair_challenge",│
-  │         "code":"834921",        │
+  │         "challenge_id":"uuid",  │
   │         "expires_at":1723…,     │
   │         "nonce":"a1b2…"}        │
   │<────────────────────────────────│
   │                                 │
-  │  (usuário digita o PIN no app)  │
+  │  (usuário lê o PIN exibido no   │
+  │   daemon e digita no app)       │
   │                                 │
   │  {"type":"pair_submit",         │
+  │   "challenge_id":"uuid",        │
   │   "code":"834921",              │
   │   "nonce":"a1b2…"}              │
   │────────────────────────────────>│
@@ -64,16 +66,25 @@ CLIENT                            SERVER
   │<────────────────────────────────│
 ```
 
+> O PIN de 6 dígitos é gerado pelo servidor e **exibido localmente no
+> daemon** (bandeja/tray ou `clipsyncd --show-pin`). A resposta de
+> `pair_challenge` carrega apenas `challenge_id`, `expires_at` e `nonce`
+> — **o PIN nunca atravessa o fio**.
+
 ### Regras
 
 1. A **primeira** mensagem de uma conexão **deve** ser `hello`.
    O servidor fecha a conexão se receber outra coisa primeiro.
 2. Se `device.id` está na lista de confiados do servidor, o pareamento
    é pulado e `pair_ok` é enviado imediatamente.
-3. Se `device.id` é `null` (ou desconhecido), o servidor envia
-   `pair_challenge`. O client **deve** mostrar o PIN na tela.
-4. `pair_submit` com PIN correto + nonce correto → `pair_ok`.
-   PIN errado → `pair_fail` e o servidor fecha a conexão.
+3. Se `device.id` é `null` (ou desconhecido), o servidor gera um PIN de
+   6 dígitos, o **exibe localmente no daemon** (bandeja/tray ou
+   `clipsyncd --show-pin`) e envia `pair_challenge` com `challenge_id`,
+   `nonce` e `expires_at`. O client **não** recebe o PIN — ele é
+   digitado pelo usuário a partir da exibição no daemon.
+4. `pair_submit` com PIN correto (digitado) + `challenge_id` + nonce
+   corretos → `pair_ok`. PIN errado → `pair_fail` e o servidor fecha a
+   conexão.
 5. O `device_id` recebido em `pair_ok` **deve** ser persistido pelo
    client (SharedPreferences) e enviado em `hello` nas próximas
    conexões.
@@ -155,7 +166,10 @@ desconectado.
 
 - WebSocket **sem TLS** na v0.1 — tráfego apenas na LAN confiável.
 - Pareamento por PIN de 6 dígitos exibido no daemon (`clipsyncd --show-pin`)
-  e digitado no app.
+  e digitado no app. O PIN **nunca** é transmitido: `pair_challenge`
+  responde apenas com `challenge_id`, `nonce` e `expires_at`; o `code`
+  digitado só aparece no `pair_submit` do próprio device que está sendo
+  pareado.
 - Planejado v0.2: TLS com certificado auto-assinado + pinning, e
   criptografia AES-GCM por mensagem (chave derivada do PIN + salt via
   HKDF/PBKDF2).
