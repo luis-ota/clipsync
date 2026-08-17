@@ -49,6 +49,11 @@ pub struct TrustedDevice {
 }
 
 /// Gerencia desafios de pareamento ativos e o store de confiados.
+///
+/// Invariante: existe no máximo UM desafio de pareamento ativo por vez.
+/// `start_challenge` invalida qualquer desafio anterior (mesmo não
+/// expirado), garantindo que `active_pin()` seja determinístico e que o
+/// PIN exibido no tray corresponda ao device que está pareando agora.
 #[derive(Debug, Default)]
 pub struct PairingManager {
     challenges: HashMap<String, PairChallenge>,
@@ -61,12 +66,13 @@ impl PairingManager {
     }
 
     /// Cria um novo desafio para um device não-confiado.
-    /// Se já existe um desafio para esse device, retorna o existente
-    /// (evita que o cliente fique esperando um PIN novo a cada conexão).
+    ///
+    /// O produto pareia um único device por vez, então este método
+    /// invalida (remove) qualquer desafio anterior — mesmo não expirado —
+    /// antes de registrar o novo. Assim, nunca há dois PINs candidatos
+    /// simultaneamente e `active_pin()` permanece determinístico.
     pub fn start_challenge(&mut self, device_name: &str) -> PairChallenge {
-        let device_key = device_name.to_owned();
-        // Remove desafio antigo se expirado.
-        self.challenges.remove(&device_key);
+        self.challenges.clear();
 
         let code = generate_pin();
         let nonce = generate_nonce();
@@ -78,7 +84,8 @@ impl PairingManager {
             device_name: device_name.to_owned(),
         };
         debug!(device = %device_name, %code, "novo desafio de pareamento");
-        self.challenges.insert(device_key, challenge.clone());
+        self.challenges
+            .insert(device_name.to_owned(), challenge.clone());
         challenge
     }
 
@@ -176,12 +183,13 @@ impl PairingManager {
         self.trusted.remove(id).is_some()
     }
 
-    /// Retorna o PIN de um desafio ativo (não expirado), se houver.
+    /// Retorna o PIN do desafio ativo (não expirado), se houver.
     ///
     /// Acessor mínimo exposto para o ícone de bandeja do `clipsyncd`
-    /// exibir o PIN de pareamento atual sem acessar internos. Não há
-    /// um "PIN corrente" global: o PIN existe apenas enquanto um
-    /// dispositivo não-confiado mantém um desafio aberto.
+    /// exibir o PIN de pareamento atual sem acessar internos. Como o
+    /// `PairingManager` mantém no máximo um desafio ativo por vez
+    /// (`start_challenge` invalida os anteriores), o PIN retornado é
+    /// determinístico — nunca há múltiplos candidatos.
     pub fn active_pin(&self) -> Option<String> {
         self.challenges
             .values()
@@ -250,5 +258,27 @@ mod tests {
         let id = pm.trust("my-phone", "android");
         assert!(pm.is_trusted(&id));
         assert_eq!(pm.trusted_devices().len(), 1);
+    }
+
+    #[test]
+    fn two_simultaneous_challenges_keeps_only_the_latest() {
+        let mut pm = PairingManager::new();
+        let first = pm.start_challenge("Pixel 8");
+        let second = pm.start_challenge("Galaxy S23");
+
+        // Invariante: apenas um desafio ativo por vez.
+        assert_eq!(pm.challenges.len(), 1);
+        assert_eq!(pm.active_pin().as_deref(), Some(second.code.as_str()));
+
+        // O desafio anterior foi invalidado: submissão do PIN antigo falha.
+        let r = pm.submit("Pixel 8", &first.nonce, &first.code);
+        assert_eq!(r, Err(PairFailReason::Expired));
+
+        // O desafio atual permanece válido e pareia normalmente.
+        let dev_id = pm
+            .submit("Galaxy S23", &second.nonce, &second.code)
+            .unwrap();
+        assert!(pm.is_trusted(&dev_id));
+        assert_eq!(pm.active_pin(), None);
     }
 }
