@@ -17,8 +17,6 @@ use ksni::{MenuItem, ToolTip, Tray, TrayMethods};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use clipsync_core::clipboard::{ClipboardManager, WriteOrigin};
-
 /// Comandos enviados pelo tray para o daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -156,8 +154,8 @@ pub fn shutdown(handle: &TrayHandle) {
 }
 
 /// Exibe o PIN atual: tenta notificação freedesktop (libnotify); em caso
-/// de falha copia para o clipboard local; em última instância apenas
-/// loga. Nunca propaga erro.
+/// de falha apenas loga. NUNCA copia para o clipboard (vazaria o PIN
+/// para peers via o watcher). Nunca propaga erro.
 pub async fn show_pin(pin: Option<String>) {
     let body = pin.unwrap_or_else(|| "Nenhum PIN ativo".to_string());
     if notify_rust::Notification::new()
@@ -169,12 +167,8 @@ pub async fn show_pin(pin: Option<String>) {
     {
         return;
     }
-    let mut cm = ClipboardManager::new().unwrap_or_else(|_| ClipboardManager::headless());
-    if cm.write_text(&body, WriteOrigin::Local).is_ok() {
-        info!(pin = %body, "PIN copiado para o clipboard (notificação indisponível)");
-    } else {
-        info!(pin = %body, "PIN (notificação e clipboard indisponíveis)");
-    }
+    // Fallback: apenas loga. NUNCA copia para clipboard (vazaria para peers).
+    info!(pin = %body, "PIN (notificação indisponível; exibindo apenas no log)");
 }
 
 /// Notifica (ou loga, como fallback) a lista de peers conectados.
@@ -230,6 +224,16 @@ mod tests {
         let tip = s.tooltip_description();
         assert!(tip.starts_with("clipsyncd\n"));
         assert!(tip.contains("999999"));
+    }
+
+    #[tokio::test]
+    async fn show_pin_does_not_touch_clipboard() {
+        // show_pin deve apenas tentar notificação e, se falhar, logar.
+        // NUNCA deve copiar o PIN para o clipboard.
+        // Em ambiente headless a notificação falha e caímos no fallback
+        // de log — ambas as ramificações são seguras.
+        show_pin(Some("test-pin".into())).await;
+        show_pin(None).await;
     }
 
     #[tokio::test]

@@ -308,11 +308,15 @@ async fn cmd_discover(timeout_secs: u64) -> Result<(), Box<dyn std::error::Error
 }
 
 fn cmd_show_pin() {
-    if let Some(pin) = read_current_pin() {
-        println!("PIN atual: {pin}");
-    } else {
-        eprintln!("Nenhum PIN disponível. Rode 'clipsyncd run' para gerar um.");
-    }
+    // O PIN vive em memória no PairingManager dentro do daemon em
+    // execução. Offline não é possível consultá-lo. O tray (menu de
+    // bandeja) consegue exibir o PIN diretamente do daemon via canal
+    // interno — use-o ou rode `clipsyncd run` e observe o log.
+    eprintln!(
+        "O PIN só está disponível enquanto o daemon está rodando.\n\
+         Use o menu de bandeja (clique direito no ícone → Mostrar PIN)\n\
+         ou rode 'clipsyncd run' e observe o log do PIN no startup."
+    );
 }
 
 /// Path do arquivo de devices confiados, ou encerra com erro.
@@ -422,19 +426,6 @@ WantedBy=default.target
     println!("  cp clipsyncd.service ~/.config/systemd/user/");
     println!("  systemctl --user daemon-reload");
     println!("  systemctl --user enable --now clipsyncd");
-}
-
-/// Lê o PIN corrente do file de runtime se existir.
-fn read_current_pin() -> Option<String> {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
-    let pin_path = std::path::Path::new(&runtime_dir).join("clipsync-pin");
-    if pin_path.exists() {
-        std::fs::read_to_string(&pin_path)
-            .ok()
-            .map(|s| s.trim().to_owned())
-    } else {
-        None
-    }
 }
 
 // ---------------------------------------------------------------------------
