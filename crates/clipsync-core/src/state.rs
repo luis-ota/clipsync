@@ -30,7 +30,6 @@ pub struct PeerHandle {
     /// `device_id`; usado no compare-and-swap do `remove_peer`.
     pub session_id: String,
     pub name: String,
-    pub connected_at: i64,
     /// Canal para enviar mensagens ao peer. Enviar = colocar na fila
     /// do writer task.
     pub tx: mpsc::Sender<Message>,
@@ -62,13 +61,24 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    /// Cria um novo estado de servidor.
+    ///
+    /// Se `trusted_path` for fornecido, o [`PairingManager`] carrega e
+    /// persiste devices confiados naquele path (TOML).
     pub fn new(
         config: crate::server::ServerConfig,
+        trusted_path: Option<&std::path::Path>,
     ) -> (Self, mpsc::Receiver<crate::clipboard::ClipboardEvent>) {
         let (tx, rx) = mpsc::channel(256);
+        let pm = match trusted_path {
+            Some(path) => {
+                PairingManager::new_with_store(path).unwrap_or_else(|_| PairingManager::new())
+            }
+            None => PairingManager::new(),
+        };
         let state = Self {
             config,
-            pairing: Mutex::new(PairingManager::new()),
+            pairing: Mutex::new(pm),
             peers: RwLock::new(HashMap::new()),
             local_events: tx,
             shutdown: CancellationToken::new(),
@@ -95,7 +105,6 @@ impl ServerState {
             device_id: device_id.clone(),
             session_id: session_id.clone(),
             name,
-            connected_at: chrono::Utc::now().timestamp(),
             tx,
         };
         let mut map = self.peers.write().await;
@@ -212,7 +221,7 @@ mod tests {
         SharedState,
         mpsc::Receiver<crate::clipboard::ClipboardEvent>,
     ) {
-        let (state, rx) = ServerState::new(crate::server::ServerConfig::default());
+        let (state, rx) = ServerState::new(crate::server::ServerConfig::default(), None);
         (Arc::new(state), rx)
     }
 

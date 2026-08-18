@@ -81,29 +81,6 @@ impl Server {
         .map_err(|e| Error::Http(e.to_string()))
     }
 
-    /// Lista os peers conectados (usado pelo CLI).
-    pub async fn peer_list(&self) -> Vec<crate::state::PeerHandle> {
-        self.state.peer_list().await
-    }
-
-    /// Lista os devices confiados (usado pelo CLI).
-    pub async fn trusted_devices(&self) -> Vec<crate::pairing::TrustedDevice> {
-        self.state
-            .pairing
-            .lock()
-            .await
-            .trusted_devices()
-            .into_iter()
-            .cloned()
-            .collect()
-    }
-
-    /// Remove um peer da lista de confiados (usado pelo CLI).
-    pub async fn untrust(&self, id: &str) -> bool {
-        let id = crate::protocol::DeviceId(id.to_owned());
-        self.state.pairing.lock().await.untrust(&id)
-    }
-
     /// Monta o Router axum (endpoints `/ws` e `/healthz`).
     /// Público para permitir embedding e testes de integração.
     pub fn router(&self) -> Router {
@@ -162,7 +139,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn server_healthz_ok() {
-        let (state, _rx) = ServerState::new(ServerConfig::default());
+        let (state, _rx) = ServerState::new(ServerConfig::default(), None);
         let state = std::sync::Arc::new(state);
         let server = Server::new(ServerConfig::default(), state.clone());
         let app = server.router();

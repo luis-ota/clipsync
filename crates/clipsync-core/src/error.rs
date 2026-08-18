@@ -31,23 +31,8 @@ pub enum Error {
     #[error("pairing failed: {0}")]
     Pairing(String),
 
-    #[error("peer not trusted: {0}")]
-    PeerNotTrusted(String),
-
-    #[error("rate limit exceeded")]
-    RateLimited,
-
     #[error("payload too large: {size} bytes (max {max})")]
     PayloadTooLarge { size: usize, max: usize },
-
-    #[error("operation timed out")]
-    Timeout,
-
-    #[error("server not running")]
-    NotRunning,
-
-    #[error("other: {0}")]
-    Other(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

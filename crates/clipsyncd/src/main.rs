@@ -66,7 +66,9 @@ enum Commands {
 /// Roda o daemon: server + watcher de clipboard + mDNS.
 async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error::Error>> {
     let server_config = ServerConfig::from_config(&config);
-    let (state, mut peer_events_rx) = ServerState::new(server_config.clone());
+    let trusted_path = clipsync_core::config::trusted_devices_path().ok();
+    let (state, mut peer_events_rx) =
+        ServerState::new(server_config.clone(), trusted_path.as_deref());
     let state = std::sync::Arc::new(state);
 
     // Clipboard manager
