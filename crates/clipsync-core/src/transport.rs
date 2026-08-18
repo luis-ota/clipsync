@@ -335,6 +335,10 @@ impl ConnectionInner {
                                             }
                                         }
                                         let origin = session.peer_id().clone();
+                                        // Origin é autoritativo: sobrepõe o campo
+                                        // declarado pelo client com o device_id
+                                        // autenticado da sessão (anti-spoof + anti-eco).
+                                        let msg = msg.with_origin(origin.clone());
                                         // 1) Repassa para outros peers.
                                         self.state.broadcast_except(msg.clone(), Some(&origin)).await;
                                         // 2) Publica no canal local p/ o daemon gravar no clipboard.

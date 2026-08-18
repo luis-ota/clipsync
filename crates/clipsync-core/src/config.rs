@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::error::{Error, Result};
+use crate::protocol::DeviceId;
 use crate::SERVICE_TYPE;
 
 /// Qual projeto as pastas de config usam.
@@ -54,6 +55,12 @@ pub struct ServerConfig {
     pub bind: String,
     /// Nome amigável do PC anunciado via mDNS e exibido no cliente.
     pub name: String,
+    /// Device_id próprio do daemon. Gerado e persistido no primeiro
+    /// `load_or_default`; usado como `origin` estável (anti-eco) nas
+    /// mensagens emitidas pelo watcher. `None` apenas em configs
+    /// construídas diretamente sem passar por `load_or_default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<DeviceId>,
 }
 
 impl Default for ServerConfig {
@@ -61,6 +68,7 @@ impl Default for ServerConfig {
         Self {
             bind: "0.0.0.0:8765".into(),
             name: "linux-desktop".into(),
+            device_id: None,
         }
     }
 }
@@ -147,17 +155,25 @@ impl Config {
             None => default_config_path()?,
         };
 
-        if !path.exists() {
+        let mut cfg = if !path.exists() {
             let cfg = Config::default();
             cfg.save(&path)?;
             info!(path = %path.display(), "config padrão criada");
-            return Ok(cfg);
-        }
+            cfg
+        } else {
+            let contents = std::fs::read_to_string(&path)
+                .map_err(|e| Error::Config(format!("falha lendo {path:?}: {e}")))?;
+            toml::from_str(&contents)
+                .map_err(|e| Error::Config(format!("TOML inválido em {path:?}: {e}")))?
+        };
 
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| Error::Config(format!("falha lendo {path:?}: {e}")))?;
-        let cfg: Config = toml::from_str(&contents)
-            .map_err(|e| Error::Config(format!("TOML inválido em {path:?}: {e}")))?;
+        // O daemon precisa de um device_id próprio estável (origin do
+        // anti-eco). Gera e persiste se ausente (config antiga).
+        if cfg.server.device_id.is_none() {
+            cfg.server.device_id = Some(DeviceId::new());
+            cfg.save(&path)?;
+            info!(path = %path.display(), "device_id do daemon gerado e persistido");
+        }
         Ok(cfg)
     }
 
@@ -199,6 +215,26 @@ mod tests {
         let cfg = Config::load_or_default(Some(&path)).unwrap();
         assert!(path.exists());
         assert_eq!(cfg.server.bind, "0.0.0.0:8765");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_or_default_persists_stable_daemon_device_id() {
+        let dir = std::env::temp_dir().join(format!("clipsync-test-{}", std::process::id()));
+        let path = dir.join("config-device-id.toml");
+        let _ = std::fs::remove_file(&path);
+
+        let first = Config::load_or_default(Some(&path)).unwrap();
+        let id = first
+            .server
+            .device_id
+            .clone()
+            .expect("device_id gerado no primeiro load");
+        assert_eq!(id.as_str().len(), 36, "device_id é uuid");
+
+        // Recarregar não pode gerar um id novo: origin deve ser estável.
+        let second = Config::load_or_default(Some(&path)).unwrap();
+        assert_eq!(second.server.device_id, Some(id));
         let _ = std::fs::remove_file(&path);
     }
 }

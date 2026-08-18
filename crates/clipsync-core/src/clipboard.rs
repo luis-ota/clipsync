@@ -12,6 +12,7 @@
 //!    peers — útil para testes e CI sem display).
 
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -164,13 +165,43 @@ impl BackendKind {
     }
 }
 
+/// Rastro compartilhado da última escrita remota (anti-eco).
+///
+/// Compartilhado entre a instância que roda o watcher e a que grava
+/// no clipboard: quando o daemon grava um conteúdo vindo de um peer,
+/// o watcher vê o hash e suprime o re-broadcast (eco).
+#[derive(Debug, Clone, Default)]
+struct SelfWriteTracker(Arc<Mutex<Option<String>>>);
+
+impl SelfWriteTracker {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+
+    /// Registra o hash do último conteúdo escrito por nós.
+    fn set(&self, sha256: String) {
+        *self.0.lock().unwrap() = Some(sha256);
+    }
+
+    /// Limpa o rastro (conteúdo inexistente ou eco já absorvido).
+    fn clear(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+
+    /// `true` se `sha256` corresponde à última escrita própria pendente.
+    fn matches(&self, sha256: &str) -> bool {
+        self.0.lock().unwrap().as_deref() == Some(sha256)
+    }
+}
+
 /// Wrapper de alto nível sobre o backend.
 #[derive(Debug)]
 pub struct ClipboardManager {
     backend: BackendKind,
     /// SHA-256 do último conteúdo escrito por nós. Usado para
-    /// suprimir eco no watcher.
-    last_self_write: Option<String>,
+    /// suprimir eco no watcher. Compartilhado via [`SelfWriteTracker`]
+    /// entre o watcher e o caminho de escrita peer→local.
+    last_self_write: SelfWriteTracker,
     /// SHA-256 do último conteúdo visto pelo watcher. Usado para
     /// detectar mudanças.
     last_seen: Option<String>,
@@ -183,7 +214,7 @@ impl ClipboardManager {
         info!(backend = backend.name(), "clipboard backend selected");
         Ok(Self {
             backend,
-            last_self_write: None,
+            last_self_write: SelfWriteTracker::new(),
             last_seen: None,
         })
     }
@@ -193,7 +224,19 @@ impl ClipboardManager {
     pub fn headless() -> Self {
         Self {
             backend: BackendKind::Headless,
-            last_self_write: None,
+            last_self_write: SelfWriteTracker::new(),
+            last_seen: None,
+        }
+    }
+
+    /// Retorna uma cópia deste manager que compartilha o rastro de
+    /// escrita própria. Usado pelo caminho peer→local: gravar na cópia
+    /// marca o hash para que o watcher (na instância original) suprima
+    /// o eco, sem duplicar o estado do watcher.
+    pub fn share_self_write(&self) -> Self {
+        Self {
+            backend: self.backend,
+            last_self_write: self.last_self_write.clone(),
             last_seen: None,
         }
     }
@@ -419,7 +462,7 @@ impl ClipboardManager {
         if origin == WriteOrigin::Remote {
             // Marca como escrita remota: o watcher deve suprimir.
             let sha = hex::encode(Sha256::digest(bytes));
-            self.last_self_write = Some(sha);
+            self.last_self_write.set(sha);
         }
         Ok(())
     }
@@ -475,16 +518,16 @@ fn read_for_emit(me: &mut ClipboardManager) -> Result<Option<ClipboardSnapshot>>
     let snapshot = me.read(&[MIME_TEXT, MIME_PNG, MIME_JPEG, MIME_HTML])?;
     let Some(snap) = snapshot else {
         me.last_seen = None;
-        me.last_self_write = None;
+        me.last_self_write.clear();
         return Ok(None);
     };
 
     // Anti-eco: se o conteúdo atual é exatamente o que acabamos de
     // escrever (porque veio de um peer remoto), absorvemos e não
     // emitimos.
-    if me.last_self_write.as_deref() == Some(snap.sha256.as_str()) {
+    if me.last_self_write.matches(&snap.sha256) {
         debug!(sha256 = %snap.sha256, "anti-echo: ignorando escrita própria");
-        me.last_self_write = None;
+        me.last_self_write.clear();
         me.last_seen = Some(snap.sha256);
         return Ok(None);
     }
@@ -785,5 +828,23 @@ mod tests {
         // Headless sempre lê None: nenhum evento a emitir.
         assert!(read_for_emit(&mut m).unwrap().is_none());
         assert!(read_for_emit(&mut m).unwrap().is_none());
+    }
+
+    #[test]
+    fn shared_self_write_tracker_marks_across_managers() {
+        let watcher = ClipboardManager::headless();
+        let mut writer = watcher.share_self_write();
+        let sha = hex::encode(Sha256::digest(b"eco"));
+
+        // Escrita remota na instância do caminho peer→local marca o
+        // rastro que o watcher consulta.
+        writer.write_text("eco", WriteOrigin::Remote).unwrap();
+        assert!(watcher.last_self_write.matches(&sha));
+
+        // Escrita local não marca rastro de eco.
+        writer.write_text("outro", WriteOrigin::Local).unwrap();
+        assert!(watcher.last_self_write.matches(&sha));
+        watcher.last_self_write.clear();
+        assert!(!watcher.last_self_write.matches(&sha));
     }
 }
