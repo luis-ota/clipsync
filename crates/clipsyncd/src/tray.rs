@@ -12,6 +12,8 @@
 //! deve falhar por causa do tray: use `--no-tray` ou `CLIPSYNC_NO_TRAY`
 //! para desativá-lo explicitamente.
 
+use std::fmt;
+
 use ksni::menu::StandardItem;
 use ksni::{MenuItem, ToolTip, Tray, TrayMethods};
 use tokio::sync::mpsc;
@@ -28,6 +30,29 @@ pub enum TrayCommand {
     Quit,
 }
 
+/// Estado operacional do daemon, exibido no tray.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DaemonState {
+    /// O daemon está ativo e aceitando conexões.
+    Running,
+    /// O daemon está ocioso (sem peers conectados).
+    #[default]
+    Idle,
+    /// O daemon encontrou um erro.
+    #[allow(dead_code)]
+    Error,
+}
+
+impl fmt::Display for DaemonState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => f.write_str("rodando"),
+            Self::Idle => f.write_str("ocioso"),
+            Self::Error => f.write_str("erro"),
+        }
+    }
+}
+
 /// Snapshot de estado exibido pelo tray.
 #[derive(Debug, Clone, Default)]
 pub struct TrayStatus {
@@ -35,8 +60,8 @@ pub struct TrayStatus {
     pub peer_count: usize,
     /// PIN de pareamento ativo, se houver.
     pub pin: Option<String>,
-    /// Estado do daemon ("rodando", "ocioso", ...).
-    pub state: String,
+    /// Estado operacional do daemon.
+    pub state: DaemonState,
 }
 
 impl TrayStatus {
@@ -196,7 +221,7 @@ mod tests {
         let s = TrayStatus {
             peer_count: 2,
             pin: Some("123456".into()),
-            state: "rodando".into(),
+            state: DaemonState::Running,
         };
         assert!(s.status_label().contains("2 peer(s)"));
         assert!(s.status_label().contains("123456"));
@@ -208,7 +233,7 @@ mod tests {
         let s = TrayStatus {
             peer_count: 0,
             pin: None,
-            state: "ocioso".into(),
+            state: DaemonState::Idle,
         };
         assert!(s.status_label().contains("PIN: nenhum"));
         assert!(s.status_label().contains("0 peer(s)"));
@@ -219,11 +244,23 @@ mod tests {
         let s = TrayStatus {
             peer_count: 1,
             pin: Some("999999".into()),
-            state: "rodando".into(),
+            state: DaemonState::Running,
         };
         let tip = s.tooltip_description();
         assert!(tip.starts_with("clipsyncd\n"));
         assert!(tip.contains("999999"));
+    }
+
+    #[test]
+    fn daemon_state_display() {
+        assert_eq!(DaemonState::Running.to_string(), "rodando");
+        assert_eq!(DaemonState::Idle.to_string(), "ocioso");
+        assert_eq!(DaemonState::Error.to_string(), "erro");
+    }
+
+    #[test]
+    fn daemon_state_default_is_idle() {
+        assert_eq!(DaemonState::default(), DaemonState::Idle);
     }
 
     #[tokio::test]

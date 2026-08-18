@@ -212,7 +212,7 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
                         let status = tray::TrayStatus {
                             peer_count,
                             pin,
-                            state: "rodando".to_string(),
+                            state: tray::DaemonState::Running,
                         };
                         tray::update(&handle_for_updater, status).await;
                     }
