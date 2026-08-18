@@ -11,12 +11,13 @@
 //! 3. Em último caso, opera em modo `headless` (apenas relay entre
 //!    peers — útil para testes e CI sem display).
 
+mod watch;
+
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -29,15 +30,7 @@ pub const MIME_PNG: &str = "image/png";
 pub const MIME_JPEG: &str = "image/jpeg";
 pub const MIME_HTML: &str = "text/html";
 
-/// Janela de debounce: mudanças dentro desse intervalo são
-/// coalescidas em um único evento (processa apenas a última).
-const DEBOUNCE: Duration = Duration::from_millis(300);
-
 /// Conteúdo rich text (HTML) associado a um snapshot.
-///
-/// Agrupa o conteúdo HTML e seu SHA-256, que antes eram campos
-/// separados (`html: Option<String>` + `html_sha256: Option<String>`)
-/// sempre preenchidos juntos.
 #[derive(Debug, Clone)]
 pub struct RichText {
     pub html: String,
@@ -48,46 +41,36 @@ pub struct RichText {
 ///
 /// O campo `rich` carrega o conteúdo rich text (text/html) quando
 /// disponível no clipboard, além do conteúdo primário em `bytes`.
-/// Em Wayland isso vem de `wl-paste --type text/html`; em X11 e
-/// headless fica sempre `None` (sem suporte confiável a MIME seletivo).
 #[derive(Debug, Clone)]
 pub struct ClipboardSnapshot {
     pub mime: String,
     pub bytes: Vec<u8>,
     pub sha256: String,
-    /// Conteúdo rich text (HTML + sha256) quando o clipboard oferece
-    /// `text/html` além do texto plain. `None` em backends sem suporte
-    /// a MIME seletivo.
     pub rich: Option<RichText>,
 }
 
 impl ClipboardSnapshot {
-    /// Constrói um snapshot de texto plain. Sem conteúdo rich text.
+    fn new_basic(mime: &str, bytes: Vec<u8>, sha256: String) -> Self {
+        Self {
+            mime: mime.to_owned(),
+            bytes,
+            sha256,
+            rich: None,
+        }
+    }
+
+    /// Snapshot de texto plain.
     pub fn new_text(mime: &str, bytes: Vec<u8>, sha256: String) -> Self {
-        Self {
-            mime: mime.to_owned(),
-            bytes,
-            sha256,
-            rich: None,
-        }
+        Self::new_basic(mime, bytes, sha256)
     }
 
-    /// Constrói um snapshot de imagem. Sem conteúdo rich text.
+    /// Snapshot de imagem.
     pub fn new_image(mime: &str, bytes: Vec<u8>, sha256: String) -> Self {
-        Self {
-            mime: mime.to_owned(),
-            bytes,
-            sha256,
-            rich: None,
-        }
+        Self::new_basic(mime, bytes, sha256)
     }
 
-    /// Constrói um snapshot de rich text (HTML).
-    ///
-    /// `bytes` carrega o texto plain alternativo (`alt`) quando
-    /// disponível, servindo de fallback para backends que não
-    /// suportam escrita seletiva de text/html. `sha256` é o hash do
-    /// HTML, armazenado em `rich.sha256`.
+    /// Snapshot de rich text (HTML). `bytes` é o fallback plain text;
+    /// `sha256` é o hash do HTML, armazenado em `rich.sha256`.
     pub fn new_html(html: String, alt: Option<String>, sha256: String) -> Self {
         let bytes = alt
             .map(|a| a.into_bytes())
@@ -122,24 +105,17 @@ impl ClipboardSnapshot {
     }
 }
 
-/// Origem de uma escrita no clipboard local. Usado para anti-eco:
-/// quando o daemon escreve algo vindo de um peer remoto, ele
-/// marca o evento para que o watcher não reenvie aos outros peers.
+/// Origem de uma escrita no clipboard local. Usado para anti-eco.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOrigin {
-    /// Escrita originada de um peer remoto. Não retransmitir.
     Remote,
-    /// Escrita originada localmente (CLI, tray, etc). Transmitir.
     Local,
 }
 
 /// Eventos emitidos pelo watcher.
 #[derive(Debug, Clone)]
 pub enum ClipboardEvent {
-    /// Conteúdo mudou (não veio de uma escrita nossa recente).
     Changed(Box<ClipboardSnapshot>),
-    /// Backend de clipboard indisponível; o watcher está em modo
-    /// passivo. Aplicações ainda podem chamar `write_*` manualmente.
     BackendLost(String),
 }
 
@@ -162,10 +138,6 @@ impl BackendKind {
 }
 
 /// Rastro compartilhado da última escrita remota (anti-eco).
-///
-/// Compartilhado entre a instância que roda o watcher e a que grava
-/// no clipboard: quando o daemon grava um conteúdo vindo de um peer,
-/// o watcher vê o hash e suprime o re-broadcast (eco).
 #[derive(Debug, Clone, Default)]
 struct SelfWriteTracker(Arc<Mutex<Option<String>>>);
 
@@ -173,33 +145,22 @@ impl SelfWriteTracker {
     fn new() -> Self {
         Self(Arc::new(Mutex::new(None)))
     }
-
-    /// Registra o hash do último conteúdo escrito por nós.
     fn set(&self, sha256: String) {
         *self.0.lock().unwrap() = Some(sha256);
     }
-
-    /// Limpa o rastro (conteúdo inexistente ou eco já absorvido).
     fn clear(&self) {
         *self.0.lock().unwrap() = None;
     }
-
-    /// `true` se `sha256` corresponde à última escrita própria pendente.
     fn matches(&self, sha256: &str) -> bool {
         self.0.lock().unwrap().as_deref() == Some(sha256)
     }
 }
 
-/// Wrapper de alto nível sobre o backend.
+/// Wrapper de alto nível sobre o backend de clipboard.
 #[derive(Debug)]
 pub struct ClipboardManager {
     backend: BackendKind,
-    /// SHA-256 do último conteúdo escrito por nós. Usado para
-    /// suprimir eco no watcher. Compartilhado via [`SelfWriteTracker`]
-    /// entre o watcher e o caminho de escrita peer→local.
     last_self_write: SelfWriteTracker,
-    /// SHA-256 do último conteúdo visto pelo watcher. Usado para
-    /// detectar mudanças.
     last_seen: Option<String>,
 }
 
@@ -216,7 +177,6 @@ impl ClipboardManager {
     }
 
     /// Constrói um manager em modo headless (sem display).
-    /// Útil para testes e ambientes sem servidor gráfico.
     pub fn headless() -> Self {
         Self {
             backend: BackendKind::Headless,
@@ -225,10 +185,7 @@ impl ClipboardManager {
         }
     }
 
-    /// Retorna uma cópia deste manager que compartilha o rastro de
-    /// escrita própria. Usado pelo caminho peer→local: gravar na cópia
-    /// marca o hash para que o watcher (na instância original) suprima
-    /// o eco, sem duplicar o estado do watcher.
+    /// Cópia que compartilha o rastro de escrita própria (anti-eco).
     pub fn share_self_write(&self) -> Self {
         Self {
             backend: self.backend,
@@ -238,19 +195,14 @@ impl ClipboardManager {
     }
 
     fn pick_backend() -> BackendKind {
-        // 1) Wayland (preferido)
         if std::env::var_os("WAYLAND_DISPLAY").is_some()
             || std::env::var_os("WAYLAND_SOCKET").is_some()
         {
             return BackendKind::Wayland;
         }
-
-        // 2) X11
         if std::env::var_os("DISPLAY").is_some() {
             return BackendKind::X11;
         }
-
-        // 3) Headless
         BackendKind::Headless
     }
 
@@ -258,42 +210,37 @@ impl ClipboardManager {
         self.backend
     }
 
-    /// Verifica se as ferramentas externas existem.
+    /// Verifica se as ferramentas externas necessárias existem.
     pub fn check_tools(&self) -> Result<()> {
         match self.backend {
             BackendKind::Wayland => {
-                for tool in ["wl-paste", "wl-copy"] {
-                    if Command::new("which").arg(tool).output().is_err() {
-                        return Err(Error::Clipboard(format!(
-                            "{tool} não encontrado. Instale com: sudo pacman -S wl-clipboard"
-                        )));
-                    }
-                }
+                Self::check_tool("wl-paste", "wl-clipboard")?;
+                Self::check_tool("wl-copy", "wl-clipboard")?;
             }
             BackendKind::X11 => {
-                for tool in ["xclip", "xsel"] {
-                    if Command::new("which").arg(tool).output().is_err() {
-                        return Err(Error::Clipboard(format!(
-                            "{tool} não encontrado. Instale com: sudo pacman -S xclip"
-                        )));
-                    }
-                }
+                Self::check_tool("xclip", "xclip")?;
+                Self::check_tool("xsel", "xclip")?;
             }
             BackendKind::Headless => {}
         }
         Ok(())
     }
 
+    fn check_tool(tool: &str, pkg: &str) -> Result<()> {
+        if Command::new("which").arg(tool).output().is_err() {
+            return Err(Error::Clipboard(format!(
+                "{tool} não encontrado. Instale com: sudo pacman -S {pkg}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Lê o conteúdo atual do clipboard. Retorna `None` se vazio.
     ///
-    /// Em Wayland, quando o conteúdo primário é texto plain, também
-    /// tenta ler `text/html` via `wl-paste --type text/html` e anexa
-    /// ao snapshot em [`ClipboardSnapshot::html`]. Em X11/headless o
-    /// HTML fica sempre `None` (logado em debug).
+    /// Em Wayland, tenta `text/html` como complemento ao texto plain.
     pub fn read(&mut self, preferred_mimes: &[&str]) -> Result<Option<ClipboardSnapshot>> {
         match self.backend {
             BackendKind::Wayland => {
-                // Tenta cada mime em ordem de preferência.
                 for mime in preferred_mimes {
                     let out = Command::new("wl-paste")
                         .arg("--no-newline")
@@ -306,7 +253,7 @@ impl ClipboardManager {
                             Self::attach_html(&mut snap);
                             return Ok(Some(snap));
                         }
-                        Ok(o) if o.status.success() => continue, // vazio
+                        Ok(o) if o.status.success() => continue,
                         Ok(_) => continue,
                         Err(e) => {
                             debug!(mime, error = %e, "wl-paste falhou");
@@ -326,8 +273,6 @@ impl ClipboardManager {
                     match out {
                         Ok(o) if o.status.success() && !o.stdout.is_empty() => {
                             let snap = Self::snapshot(MIME_TEXT, o.stdout);
-                            // xclip não expõe MIME seletivo de forma
-                            // confiável: não lemos HTML aqui.
                             debug!("x11: leitura de HTML não suportada");
                             return Ok(Some(snap));
                         }
@@ -341,8 +286,7 @@ impl ClipboardManager {
         }
     }
 
-    /// Anexa o conteúdo `text/html` ao snapshot quando disponível.
-    /// Se o mime primário já for HTML, espelha `bytes` em `rich`.
+    /// Anexa `text/html` ao snapshot quando disponível.
     fn attach_html(snap: &mut ClipboardSnapshot) {
         if snap.mime == MIME_HTML {
             let html = String::from_utf8_lossy(&snap.bytes).into_owned();
@@ -384,8 +328,7 @@ impl ClipboardManager {
         self.write(MIME_TEXT, text.as_bytes(), origin)
     }
 
-    /// Escreve imagem no clipboard. `mime` deve ser `image/png` ou
-    /// `image/jpeg`.
+    /// Escreve imagem no clipboard.
     pub fn write_image(&mut self, mime: &str, bytes: &[u8], origin: WriteOrigin) -> Result<()> {
         if !mime.starts_with("image/") {
             return Err(Error::Protocol(format!("mime de imagem inválido: {mime}")));
@@ -393,9 +336,7 @@ impl ClipboardManager {
         self.write(mime, bytes, origin)
     }
 
-    /// Escreve rich text (HTML) no clipboard via `wl-copy -t text/html`
-    /// (Wayland). Em X11, grava como texto (xclip não suporta MIME
-    /// seletivo). Em headless, é no-op (log debug).
+    /// Escreve rich text (HTML) no clipboard.
     pub fn write_html(&mut self, html: &str, origin: WriteOrigin) -> Result<()> {
         self.write(MIME_HTML, html.as_bytes(), origin)
     }
@@ -403,87 +344,58 @@ impl ClipboardManager {
     fn write(&mut self, mime: &str, bytes: &[u8], origin: WriteOrigin) -> Result<()> {
         match self.backend {
             BackendKind::Wayland => {
-                let mut child = Command::new("wl-copy")
-                    .arg("--type")
-                    .arg(mime)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| Error::Clipboard(format!("falha spawn wl-copy: {e}")))?;
-
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut() {
-                    stdin
-                        .write_all(bytes)
-                        .map_err(|e| Error::Clipboard(format!("falha escrevendo stdin: {e}")))?;
-                }
-                let out = child
-                    .wait_with_output()
-                    .map_err(|e| Error::Clipboard(format!("falha wait wl-copy: {e}")))?;
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    return Err(Error::Clipboard(format!(
-                        "wl-copy falhou: {}",
-                        stderr.trim()
-                    )));
-                }
+                Self::spawn_and_write("wl-copy", &["--type", mime], bytes)?;
             }
             BackendKind::X11 => {
-                let mut child = Command::new("xclip")
-                    .args(["-selection", "clipboard", "-i"])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| Error::Clipboard(format!("falha spawn xclip: {e}")))?;
-
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut() {
-                    stdin
-                        .write_all(bytes)
-                        .map_err(|e| Error::Clipboard(format!("falha escrevendo stdin: {e}")))?;
-                }
-                let out = child
-                    .wait_with_output()
-                    .map_err(|e| Error::Clipboard(format!("falha wait xclip: {e}")))?;
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    return Err(Error::Clipboard(format!("xclip falhou: {}", stderr.trim())));
-                }
+                Self::spawn_and_write("xclip", &["-selection", "clipboard", "-i"], bytes)?;
             }
             BackendKind::Headless => {
                 debug!("headless: ignorando write de {} bytes", bytes.len());
             }
         }
-
         if origin == WriteOrigin::Remote {
-            // Marca como escrita remota: o watcher deve suprimir.
             let sha = hex::encode(Sha256::digest(bytes));
             self.last_self_write.set(sha);
         }
         Ok(())
     }
 
-    /// Inicia um watcher que emite eventos de mudança. O canal é
-    /// fechado quando o manager é droppado ou o backend falha.
+    fn spawn_and_write(cmd: &str, args: &[&str], bytes: &[u8]) -> Result<()> {
+        use std::io::Write;
+        let mut child = Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| Error::Clipboard(format!("falha spawn {cmd}: {e}")))?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(bytes)
+                .map_err(|e| Error::Clipboard(format!("falha escrevendo stdin: {e}")))?;
+        }
+        let out = child
+            .wait_with_output()
+            .map_err(|e| Error::Clipboard(format!("falha wait {cmd}: {e}")))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(Error::Clipboard(format!("{cmd} falhou: {}", stderr.trim())));
+        }
+        Ok(())
+    }
+
+    /// Inicia um watcher que emite [`ClipboardEvent::Changed`].
     ///
-    /// Em Wayland, preferiu-se o modo event-driven via
-    /// `wl-paste --watch` (subprocesso bloqueante que emite uma
-    /// notificação por mudança), eliminando o polling ativo. X11 e
-    /// headless usam polling (com `interval`) como fallback. Se
-    /// `wl-paste --watch` falhar ao subir, cai para polling com aviso.
-    ///
-    /// Múltiplas mudanças dentro de [`DEBOUNCE`] são coalescidas em
-    /// um único [`ClipboardEvent::Changed`] com o último snapshot.
+    /// Wayland usa `wl-paste --watch`; X11/headless faz polling.
+    /// Mudanças rápidas são coalescidas via debounce.
     pub fn watch(self, interval: Duration) -> mpsc::Receiver<ClipboardEvent> {
         let (tx, rx) = mpsc::channel(64);
         let backend = self.backend;
 
         tokio::spawn(async move {
             let mut me = self;
-            if backend == BackendKind::Wayland && wl_paste_exists() {
-                match run_event_driven(&mut me, tx.clone()).await {
+            if backend == BackendKind::Wayland && watch::wl_paste_exists() {
+                match watch::run_event_driven(&mut me, tx.clone()).await {
                     Ok(()) => return,
                     Err(e) => {
                         warn!(error = %e, "wl-paste --watch falhou; caindo para polling");
@@ -491,223 +403,10 @@ impl ClipboardManager {
                     }
                 }
             }
-            run_polling(&mut me, tx, interval).await;
+            watch::run_polling(&mut me, tx, interval).await;
         });
 
         rx
-    }
-}
-
-/// Verifica se o binário `wl-paste` está disponível no PATH.
-fn wl_paste_exists() -> bool {
-    Command::new("which")
-        .arg("wl-paste")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Lê o clipboard e devolve `Some(snapshot)` apenas quando o
-/// conteúdo é novo (ou seja, diferente do último visto e não é
-/// eco de uma escrita nossa). Atualiza `last_seen`/`last_self_write`
-/// conforme necessário. É a lógica compartilhada entre os modos
-/// event-driven e polling.
-fn read_for_emit(me: &mut ClipboardManager) -> Result<Option<ClipboardSnapshot>> {
-    let snapshot = me.read(&[MIME_TEXT, MIME_PNG, MIME_JPEG, MIME_HTML])?;
-    let Some(snap) = snapshot else {
-        me.last_seen = None;
-        me.last_self_write.clear();
-        return Ok(None);
-    };
-
-    // Anti-eco: se o conteúdo atual é exatamente o que acabamos de
-    // escrever (porque veio de um peer remoto), absorvemos e não
-    // emitimos.
-    if me.last_self_write.matches(&snap.sha256) {
-        debug!(sha256 = %snap.sha256, "anti-echo: ignorando escrita própria");
-        me.last_self_write.clear();
-        me.last_seen = Some(snap.sha256);
-        return Ok(None);
-    }
-
-    // Conteúdo igual ao último visto: nada novo.
-    if me.last_seen.as_deref() == Some(snap.sha256.as_str()) {
-        return Ok(None);
-    }
-
-    me.last_seen = Some(snap.sha256.clone());
-    Ok(Some(snap))
-}
-
-/// Debouncer puro: coalescea uma rajada de snapshots em um único
-/// evento, retendo apenas o último. A janela é [`DEBOUNCE`].
-///
-/// Independente de tokio/display — testável com lógica pura.
-#[derive(Debug, Default)]
-struct Debouncer {
-    pending: Option<ClipboardSnapshot>,
-    deadline: Option<Instant>,
-}
-
-impl Debouncer {
-    /// Registra/reescreve o snapshot pendente e rearma a janela.
-    fn feed_at(&mut self, snap: ClipboardSnapshot, now: Instant) {
-        self.pending = Some(snap);
-        self.deadline = Some(now + DEBOUNCE);
-    }
-
-    /// Devolve o snapshot pendente se a janela já expirou; caso
-    /// contrário, mantém o estado e retorna `None`.
-    fn fire_at(&mut self, now: Instant) -> Option<ClipboardSnapshot> {
-        match (self.pending.take(), self.deadline) {
-            (Some(snap), Some(dl)) if now >= dl => {
-                self.deadline = None;
-                Some(snap)
-            }
-            (snap, _) => {
-                self.pending = snap;
-                None
-            }
-        }
-    }
-
-    fn has_pending(&self) -> bool {
-        self.pending.is_some()
-    }
-}
-
-/// Watcher event-driven para Wayland: spawn `wl-paste --watch cat`
-/// (subprocesso bloqueante que escreve no stdout a cada mudança de
-/// clipboard) e processa cada notificação através do debouncer.
-async fn run_event_driven(
-    me: &mut ClipboardManager,
-    tx: mpsc::Sender<ClipboardEvent>,
-) -> Result<()> {
-    let mut child = tokio::process::Command::new("wl-paste")
-        .arg("--watch")
-        .arg("cat")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| Error::Clipboard(format!("falha spawn wl-paste --watch: {e}")))?;
-
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::Clipboard("wl-paste --watch sem stdout".into()))?;
-
-    let mut buf = [0u8; 4096];
-    let mut debouncer = Debouncer::default();
-    // Sleep re-armável: quando há pending, expira em `DEBOUNCE`.
-    let debounce_timer = tokio::time::sleep(DEBOUNCE);
-    tokio::pin!(debounce_timer);
-    let mut timer_armed = false;
-
-    loop {
-        tokio::select! {
-            r = stdout.read(&mut buf) => {
-                match r {
-                    Ok(0) => {
-                        let _ = child.start_kill();
-                        return Err(Error::Clipboard(
-                            "wl-paste --watch encerrou (EOF)".into(),
-                        ));
-                    }
-                    Ok(_) => {
-                        match read_for_emit(me) {
-                            Ok(Some(snap)) => {
-                                debouncer.feed_at(snap, Instant::now());
-                                debounce_timer
-                                    .as_mut()
-                                    .reset(tokio::time::Instant::now() + DEBOUNCE);
-                                timer_armed = true;
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                warn!(error = %e, "falha lendo clipboard (event-driven)");
-                                let _ = tx
-                                    .send(ClipboardEvent::BackendLost(e.to_string()))
-                                    .await;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = child.start_kill();
-                        return Err(Error::Clipboard(format!(
-                            "wl-paste --watch read: {e}"
-                        )));
-                    }
-                }
-            }
-            _ = &mut debounce_timer, if timer_armed && debouncer.has_pending() => {
-                if let Some(snap) = debouncer.fire_at(Instant::now()) {
-                    timer_armed = false;
-                    if tx
-                        .send(ClipboardEvent::Changed(Box::new(snap)))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    let _ = child.start_kill();
-    Ok(())
-}
-
-/// Watcher por polling (fallback X11/headless ou falha do
-/// `wl-paste --watch`). Mesmo comportamento de antes, agora com
-/// debounce de rajadas.
-async fn run_polling(
-    me: &mut ClipboardManager,
-    tx: mpsc::Sender<ClipboardEvent>,
-    interval: Duration,
-) {
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    // tick inicial imediato (comportamento de tokio::interval).
-    let mut debouncer = Debouncer::default();
-    let debounce_timer = tokio::time::sleep(DEBOUNCE);
-    tokio::pin!(debounce_timer);
-    let mut timer_armed = false;
-
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                match read_for_emit(me) {
-                    Ok(s) => {
-                        if let Some(snap) = s {
-                            debouncer.feed_at(snap, Instant::now());
-                            debounce_timer
-                                .as_mut()
-                                .reset(tokio::time::Instant::now() + DEBOUNCE);
-                            timer_armed = true;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "falha lendo clipboard");
-                        let _ = tx.send(ClipboardEvent::BackendLost(e.to_string())).await;
-                    }
-                }
-            }
-            _ = &mut debounce_timer, if timer_armed && debouncer.has_pending() => {
-                if let Some(snap) = debouncer.fire_at(Instant::now()) {
-                    timer_armed = false;
-                    if tx
-                        .send(ClipboardEvent::Changed(Box::new(snap)))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -741,7 +440,6 @@ mod tests {
         let s3 = ClipboardManager::snapshot("text/plain", b"hellp".to_vec());
         assert_eq!(s1.sha256, s2.sha256);
         assert_ne!(s1.sha256, s3.sha256);
-        // Snapshots sem rich text não têm campo rich.
         assert!(s1.rich.is_none());
     }
 
@@ -753,7 +451,6 @@ mod tests {
             hex::encode(Sha256::digest(b"<b>hello</b>")),
         );
         let plain = ClipboardManager::snapshot("text/plain", b"hello".to_vec());
-        // O sha256 do snapshot de HTML é o hash do HTML, não do alt.
         assert_ne!(s.sha256, plain.sha256);
         let rich = s.rich.as_ref().expect("rich text presente");
         assert_eq!(rich.sha256, s.sha256);
@@ -780,71 +477,14 @@ mod tests {
     }
 
     #[test]
-    fn debouncer_coalesces_bursts_to_latest() {
-        let mut d = Debouncer::default();
-        let t0 = Instant::now();
-        let s1 = ClipboardManager::snapshot("text/plain", b"a".to_vec());
-        let s2 = ClipboardManager::snapshot("text/plain", b"ab".to_vec());
-        let s3 = ClipboardManager::snapshot("text/plain", b"abc".to_vec());
-
-        // Rajada: 3 mudanças dentro de <300ms.
-        d.feed_at(s1, t0);
-        d.feed_at(s2, t0 + Duration::from_millis(100));
-        d.feed_at(s3, t0 + Duration::from_millis(200));
-
-        // Antes da janela expirar (300ms após a última feed): nada.
-        assert!(d.fire_at(t0 + Duration::from_millis(499)).is_none());
-        assert!(d.has_pending());
-
-        // Exatamente após a janela: emite apenas o último snapshot.
-        let emitted = d
-            .fire_at(t0 + Duration::from_millis(500))
-            .expect("emite o último snapshot da rajada");
-        assert_eq!(emitted.text(), Some("abc"));
-
-        // Após emitir, fica vazio.
-        assert!(!d.has_pending());
-        assert!(d.fire_at(t0 + Duration::from_millis(9999)).is_none());
-    }
-
-    #[test]
-    fn debouncer_rearms_on_new_feed() {
-        let mut d = Debouncer::default();
-        let t0 = Instant::now();
-        let s1 = ClipboardManager::snapshot("text/plain", b"first".to_vec());
-        let s2 = ClipboardManager::snapshot("text/plain", b"second".to_vec());
-
-        d.feed_at(s1, t0);
-        // Segunda feed bem depois reescreve o pending e rearma.
-        d.feed_at(s2, t0 + Duration::from_millis(400));
-        // Ainda não (300ms após a segunda feed).
-        assert!(d.fire_at(t0 + Duration::from_millis(699)).is_none());
-        let emitted = d
-            .fire_at(t0 + Duration::from_millis(700))
-            .expect("emite o segundo snapshot");
-        assert_eq!(emitted.text(), Some("second"));
-    }
-
-    #[test]
-    fn read_for_emit_dedups_in_headless() {
-        let mut m = ClipboardManager::headless();
-        // Headless sempre lê None: nenhum evento a emitir.
-        assert!(read_for_emit(&mut m).unwrap().is_none());
-        assert!(read_for_emit(&mut m).unwrap().is_none());
-    }
-
-    #[test]
     fn shared_self_write_tracker_marks_across_managers() {
         let watcher = ClipboardManager::headless();
         let mut writer = watcher.share_self_write();
         let sha = hex::encode(Sha256::digest(b"eco"));
 
-        // Escrita remota na instância do caminho peer→local marca o
-        // rastro que o watcher consulta.
         writer.write_text("eco", WriteOrigin::Remote).unwrap();
         assert!(watcher.last_self_write.matches(&sha));
 
-        // Escrita local não marca rastro de eco.
         writer.write_text("outro", WriteOrigin::Local).unwrap();
         assert!(watcher.last_self_write.matches(&sha));
         watcher.last_self_write.clear();
