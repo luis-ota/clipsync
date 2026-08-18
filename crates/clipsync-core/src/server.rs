@@ -15,14 +15,29 @@ use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::protocol::DeviceId;
 use crate::state::SharedState;
 
-/// Configuração do servidor, derivada da [`Config`] do daemon.
+/// Endereço de bind padrão do servidor.
+const DEFAULT_BIND: &str = "0.0.0.0:8765";
+/// Nome amigável padrão do servidor.
+const DEFAULT_NAME: &str = "linux-desktop";
+
+/// Configuração unificada do servidor, construída uma única vez a
+/// partir do [`Config`] no boot e compartilhada por referência em
+/// todo o runtime (state, transport, message loop).
+///
+/// Substitui a antiga triplicação entre `config::ServerConfig` (TOML),
+/// `server::ServerConfig` (runtime) e flags derivadas inline no
+/// transport. Agora existe **uma** fonte de verdade para o runtime.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub bind: String,
     pub name: String,
     pub clipboard: crate::config::ClipboardConfig,
+    /// ID próprio do daemon (persistido no TOML). Usado como
+    /// `origin` estável no anti-eco do watcher.
+    pub device_id: Option<DeviceId>,
 }
 
 impl ServerConfig {
@@ -31,16 +46,27 @@ impl ServerConfig {
             bind: cfg.server.bind.clone(),
             name: cfg.server.name.clone(),
             clipboard: cfg.clipboard.clone(),
+            device_id: cfg.server.device_id.clone(),
         }
+    }
+
+    /// Porta extraída do `bind`. Fallback: 8765.
+    pub fn port(&self) -> u16 {
+        self.bind
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(8765)
     }
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:8765".into(),
-            name: "linux-desktop".into(),
+            bind: DEFAULT_BIND.into(),
+            name: DEFAULT_NAME.into(),
             clipboard: crate::config::ClipboardConfig::default(),
+            device_id: None,
         }
     }
 }

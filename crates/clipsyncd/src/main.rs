@@ -11,10 +11,10 @@ use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use clipsync_core::clipboard::{ClipboardEvent, ClipboardManager, WriteOrigin, MIME_HTML};
+use clipsync_core::clipboard::{ClipboardEvent, ClipboardManager};
 use clipsync_core::config::Config;
 use clipsync_core::discovery::Discovery;
-use clipsync_core::protocol::Message;
+use clipsync_core::dispatch;
 use clipsync_core::server::{Server, ServerConfig};
 use clipsync_core::state::ServerState;
 
@@ -83,14 +83,8 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
 
     // mDNS announce
     let discovery = Discovery::new()?;
-    let port = config
-        .server
-        .bind
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(8765);
-    if let Err(e) = discovery.announce(&config.server.name, port) {
+    let port = server_config.port();
+    if let Err(e) = discovery.announce(&server_config.name, port) {
         warn!(error = %e, "falha anunciando serviço mDNS");
     }
 
@@ -98,54 +92,19 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     // `origin` é o device_id persistido do daemon (estável por sessão),
     // nunca um UUID novo por frame: o dedup last_origin+last_seq dos
     // clients só funciona com origin estável.
-    let daemon_id = config.server.device_id.clone().unwrap_or_default();
-    let watcher_rx = clipboard.watch(Duration::from_millis(config.clipboard.poll_interval_ms));
+    let daemon_id = server_config.device_id.clone().unwrap_or_default();
+    let clipboard_cfg = server_config.clipboard.clone();
+    let watcher_rx = clipboard.watch(Duration::from_millis(clipboard_cfg.poll_interval_ms));
     let state_watcher = state.clone();
-    let sync_text = config.clipboard.sync_text;
-    let sync_images = config.clipboard.sync_images;
-    let sync_html = config.clipboard.sync_html;
     tokio::spawn(async move {
         let mut rx = watcher_rx;
         while let Some(evt) = rx.recv().await {
             match evt {
                 ClipboardEvent::Changed(snap) => {
-                    let msg = if snap.mime.starts_with("image/") && sync_images {
-                        Message::ClipboardImage {
-                            mime: snap.mime.clone(),
-                            data_b64: {
-                                use base64::Engine;
-                                base64::engine::general_purpose::STANDARD.encode(&snap.bytes)
-                            },
-                            width: None,
-                            height: None,
-                            sha256: snap.sha256,
-                            origin: daemon_id.clone(),
-                        }
-                    } else if sync_html {
-                        if let Some(rich) = &snap.rich {
-                            // Rich text: envia HTML com texto plain como `alt`
-                            // (fallback para peers que não suportam text/html).
-                            let alt = snap.text().map(|t| t.to_owned());
-                            Message::ClipboardHtml {
-                                sha256: rich.sha256.clone(),
-                                html: rich.html.clone(),
-                                alt,
-                                origin: daemon_id.clone(),
-                            }
-                        } else {
-                            continue;
-                        }
-                    } else if snap.mime.starts_with("text/") && sync_text {
-                        Message::ClipboardText {
-                            mime: snap.mime.clone(),
-                            content: String::from_utf8_lossy(&snap.bytes).into_owned(),
-                            origin: daemon_id.clone(),
-                            sha256: snap.sha256,
-                        }
-                    } else {
-                        continue;
-                    };
-                    state_watcher.broadcast_except(msg, None).await;
+                    if let Some(msg) = dispatch::event_to_message(&snap, &clipboard_cfg, &daemon_id)
+                    {
+                        state_watcher.broadcast_except(msg, None).await;
+                    }
                 }
                 ClipboardEvent::BackendLost(e) => {
                     warn!(error = %e, "backend de clipboard perdido");
@@ -160,21 +119,7 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
         while let Some(evt) = peer_events_rx.recv().await {
             match evt {
                 ClipboardEvent::Changed(snap) => {
-                    if snap.mime == MIME_HTML {
-                        if let Some(rich) = &snap.rich {
-                            // Rich text: grava HTML no clipboard. Se falhar
-                            // (ex: backend sem suporte a MIME seletivo),
-                            // cai para texto plain (`alt` em snap.bytes).
-                            if cm.write_html(&rich.html, WriteOrigin::Remote).is_err() {
-                                let fallback = snap.text().unwrap_or(&rich.html);
-                                let _ = cm.write_text(fallback, WriteOrigin::Remote);
-                            }
-                        }
-                    } else if snap.mime.starts_with("text/") {
-                        let _ = cm.write_text(snap.text().unwrap_or_default(), WriteOrigin::Remote);
-                    } else if snap.mime.starts_with("image/") {
-                        let _ = cm.write_image(&snap.mime, &snap.bytes, WriteOrigin::Remote);
-                    }
+                    dispatch::apply_peer_snapshot(&snap, &mut cm);
                 }
                 ClipboardEvent::BackendLost(e) => {
                     warn!(error = %e, "backend perdido no fluxo peer→local");
@@ -198,59 +143,7 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
         info!("tray desativado (--no-tray)");
         None
     } else {
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<tray::TrayCommand>(16);
-        match tray::spawn(cmd_tx).await {
-            Some(handle) => {
-                let handle_for_updater = handle.clone();
-                let state_for_updater = state.clone();
-                // Atualiza periodicamente o tooltip/menu do tray com
-                // PIN e contagem de peers.
-                tokio::spawn(async move {
-                    let mut ticker = tokio::time::interval(Duration::from_secs(2));
-                    ticker.tick().await; // primeiro tick imediato
-                    loop {
-                        ticker.tick().await;
-                        let peer_count = state_for_updater.peer_count().await;
-                        let pin = state_for_updater.pairing.lock().await.active_pin();
-                        let status = tray::TrayStatus {
-                            peer_count,
-                            pin,
-                            state: tray::DaemonState::Running,
-                        };
-                        tray::update(&handle_for_updater, status).await;
-                    }
-                });
-
-                // Lida com comandos vindos do menu do tray.
-                let state_for_cmds = state.clone();
-                tokio::spawn(async move {
-                    while let Some(cmd) = cmd_rx.recv().await {
-                        match cmd {
-                            tray::TrayCommand::ShowPin => {
-                                let pin = state_for_cmds.pairing.lock().await.active_pin();
-                                tray::show_pin(pin).await;
-                            }
-                            tray::TrayCommand::ListPeers => {
-                                let peers = state_for_cmds.peer_list().await;
-                                let n = peers.len();
-                                info!(peer_count = n, "peers conectados:");
-                                for p in &peers {
-                                    info!(name = %p.name, addr = %p.addr, "  peer");
-                                }
-                                tray::show_peers(n).await;
-                            }
-                            tray::TrayCommand::Quit => {
-                                info!("encerrando via tray");
-                                state_for_cmds.shutdown.cancel();
-                            }
-                        }
-                    }
-                });
-
-                Some(handle)
-            }
-            None => None,
-        }
+        setup_tray(state.clone()).await
     };
 
     tokio::select! {
@@ -279,6 +172,60 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     }
     let _ = discovery;
     Ok(())
+}
+
+/// Inicia o ícone de bandeja e suas tasks de atualização e comando.
+/// Retorna `None` se o tray não pôde ser iniciado (D-Bus indisponível).
+async fn setup_tray(state: clipsync_core::state::SharedState) -> Option<tray::TrayHandle> {
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<tray::TrayCommand>(16);
+    let handle = tray::spawn(cmd_tx).await?;
+
+    // Atualiza periodicamente o tooltip/menu do tray com PIN e peers.
+    let handle_for_updater = handle.clone();
+    let state_for_updater = state.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(2));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let peer_count = state_for_updater.peer_count().await;
+            let pin = state_for_updater.pairing.lock().await.active_pin();
+            let status = tray::TrayStatus {
+                peer_count,
+                pin,
+                state: tray::DaemonState::Running,
+            };
+            tray::update(&handle_for_updater, status).await;
+        }
+    });
+
+    // Lida com comandos vindos do menu do tray.
+    let state_for_cmds = state;
+    tokio::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                tray::TrayCommand::ShowPin => {
+                    let pin = state_for_cmds.pairing.lock().await.active_pin();
+                    tray::show_pin(pin).await;
+                }
+                tray::TrayCommand::ListPeers => {
+                    let peers = state_for_cmds.peer_list().await;
+                    let n = peers.len();
+                    info!(peer_count = n, "peers conectados:");
+                    for p in &peers {
+                        info!(name = %p.name, addr = %p.addr, "  peer");
+                    }
+                    tray::show_peers(n).await;
+                }
+                tray::TrayCommand::Quit => {
+                    info!("encerrando via tray");
+                    state_for_cmds.shutdown.cancel();
+                }
+            }
+        }
+    });
+
+    Some(handle)
 }
 
 /// Descobre daemons na rede local via mDNS e imprime os serviços

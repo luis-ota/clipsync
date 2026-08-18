@@ -92,21 +92,10 @@ impl ServerState {
     /// `superseded`). A sessão antiga, ao ser encerrada, não remove a
     /// entrada do sucessor: `remove_peer` faz compare-and-swap pela
     /// `session_id`.
-    pub async fn add_peer(
-        &self,
-        addr: SocketAddr,
-        device_id: DeviceId,
-        session_id: String,
-        name: String,
-        tx: mpsc::Sender<Message>,
-    ) {
-        let handle = PeerHandle {
-            addr,
-            device_id: device_id.clone(),
-            session_id: session_id.clone(),
-            name,
-            tx,
-        };
+    pub async fn add_peer(&self, handle: PeerHandle) {
+        let device_id = handle.device_id.clone();
+        let session_id = handle.session_id.clone();
+        let addr = handle.addr;
         let mut map = self.peers.write().await;
         if let Some(old) = map.get(&device_id) {
             if old.session_id != session_id {
@@ -225,19 +214,35 @@ mod tests {
         (Arc::new(state), rx)
     }
 
+    fn make_handle(
+        addr: &str,
+        device_id: DeviceId,
+        session_id: &str,
+        name: &str,
+        tx: mpsc::Sender<Message>,
+    ) -> PeerHandle {
+        PeerHandle {
+            addr: addr.parse().unwrap(),
+            device_id,
+            session_id: session_id.into(),
+            name: name.into(),
+            tx,
+        }
+    }
+
     #[tokio::test]
     async fn add_remove_peer() {
         let (state, _rx) = test_state();
         let (tx, _) = mpsc::channel(10);
         let id = DeviceId::new();
         state
-            .add_peer(
-                "127.0.0.1:5000".parse().unwrap(),
+            .add_peer(make_handle(
+                "127.0.0.1:5000",
                 id.clone(),
-                "sess-1".into(),
-                "phone".into(),
+                "sess-1",
+                "phone",
                 tx,
-            )
+            ))
             .await;
         assert_eq!(state.peer_count().await, 1);
         state.remove_peer(&id, "sess-1").await;
@@ -251,22 +256,10 @@ mod tests {
         let (tx_new, _) = mpsc::channel(10);
         let id = DeviceId::new();
         state
-            .add_peer(
-                "1.1.1.1:1".parse().unwrap(),
-                id.clone(),
-                "old".into(),
-                "phone".into(),
-                tx_old,
-            )
+            .add_peer(make_handle("1.1.1.1:1", id.clone(), "old", "phone", tx_old))
             .await;
         state
-            .add_peer(
-                "2.2.2.2:2".parse().unwrap(),
-                id.clone(),
-                "new".into(),
-                "phone".into(),
-                tx_new,
-            )
+            .add_peer(make_handle("2.2.2.2:2", id.clone(), "new", "phone", tx_new))
             .await;
         assert_eq!(state.peer_count().await, 1, "sucessor substitui a entrada");
 
@@ -291,22 +284,10 @@ mod tests {
         let id_a = DeviceId::new();
         let id_b = DeviceId::new();
         state
-            .add_peer(
-                "1.1.1.1:1".parse().unwrap(),
-                id_a.clone(),
-                "sess-a".into(),
-                "a".into(),
-                tx_a,
-            )
+            .add_peer(make_handle("1.1.1.1:1", id_a.clone(), "sess-a", "a", tx_a))
             .await;
         state
-            .add_peer(
-                "2.2.2.2:2".parse().unwrap(),
-                id_b.clone(),
-                "sess-b".into(),
-                "b".into(),
-                tx_b,
-            )
+            .add_peer(make_handle("2.2.2.2:2", id_b.clone(), "sess-b", "b", tx_b))
             .await;
 
         let msg = Message::ClipboardText {

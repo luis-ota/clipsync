@@ -1,4 +1,9 @@
 //! Sessão de peer: estado por-conexão e fila de envio.
+//!
+//! [`PeerSession`] é um wrapper de ciclo de vida sobre [`PeerHandle`]:
+//! gerencia a fase pré-attach (sem `device_id`) e pós-attach
+//! (registrado no mapa de peers). Todo o estado per-peer vive no
+//! `PeerHandle` — não há duplicação.
 
 use std::net::SocketAddr;
 
@@ -6,22 +11,23 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::protocol::{DeviceId, Message};
-use crate::state::SharedState;
+use crate::state::{PeerHandle, SharedState};
 
-/// Sessão de um peer conectado. Mantém o `device_id` (atribuído após
-/// pareamento ou vindo do `hello`) e a fila de envio para a task de
-/// escrita da conexão.
-#[derive(Debug, Clone)]
+/// Sessão de um peer conectado. Wrapper de ciclo de vida que gerencia
+/// o registro/desregistro no [`crate::state::ServerState`].
+///
+/// Antes de `attach()`, apenas `session_id`, `addr` e `tx` existem.
+/// Após `attach()`, um [`PeerHandle`] é criado e registrado no mapa
+/// de peers. `detach()` remove com CAS (compare-and-swap por
+/// `session_id`).
+#[derive(Debug)]
 pub struct PeerSession {
-    pub state: SharedState,
-    pub addr: SocketAddr,
-    /// ID único desta sessão de conexão.
-    pub session_id: String,
-    /// Dispositivo atribuído (após pareamento).
-    pub device_id: Option<DeviceId>,
-    /// Nome amigável do peer.
-    pub name: String,
+    state: SharedState,
+    addr: SocketAddr,
+    session_id: String,
     tx: mpsc::Sender<Message>,
+    /// `None` antes de `attach()`; `Some` após.
+    handle: Option<PeerHandle>,
 }
 
 impl PeerSession {
@@ -30,10 +36,14 @@ impl PeerSession {
             state,
             addr,
             session_id: uuid::Uuid::new_v4().to_string(),
-            device_id: None,
-            name: String::new(),
             tx,
+            handle: None,
         }
+    }
+
+    /// ID único desta sessão de conexão (gerado no `new`).
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     /// Associa um device à sessão (após pareamento ou trust) e
@@ -41,17 +51,15 @@ impl PeerSession {
     /// outra sessão ativa, ela é substituída (e notificada como
     /// `superseded`) — nunca removida por este detach.
     pub async fn attach(&mut self, device_id: DeviceId, name: String) {
-        self.device_id = Some(device_id.clone());
-        self.name = name.clone();
-        self.state
-            .add_peer(
-                self.addr,
-                device_id,
-                self.session_id.clone(),
-                name,
-                self.tx.clone(),
-            )
-            .await;
+        let handle = PeerHandle {
+            addr: self.addr,
+            device_id,
+            session_id: self.session_id.clone(),
+            name,
+            tx: self.tx.clone(),
+        };
+        self.state.add_peer(handle.clone()).await;
+        self.handle = Some(handle);
     }
 
     /// Desregistra o peer do estado compartilhado (fim da conexão).
@@ -59,15 +67,20 @@ impl PeerSession {
     /// sucessor (mesmo `device_id`, sessão nova), a entrada não é
     /// removida.
     pub async fn detach(&mut self) {
-        if let Some(id) = self.device_id.take() {
-            self.state.remove_peer(&id, &self.session_id).await;
+        if let Some(handle) = self.handle.take() {
+            self.state
+                .remove_peer(&handle.device_id, &handle.session_id)
+                .await;
         }
     }
 
+    /// ID do device atribuído (após attach). Panic se chamado antes.
     pub fn peer_id(&self) -> &DeviceId {
-        self.device_id
+        &self
+            .handle
             .as_ref()
             .expect("peer_id chamado antes do attach")
+            .device_id
     }
 
     /// Envia uma mensagem ao peer pela fila.
@@ -93,17 +106,17 @@ mod tests {
         let (state, _rx) = ServerState::new(crate::server::ServerConfig::default(), None);
         let state = std::sync::Arc::new(state);
         let (tx, mut rx) = mpsc::channel(16);
-        let mut session = PeerSession::new(state, "127.0.0.1:1".parse().unwrap(), tx);
+        let mut session = PeerSession::new(state.clone(), "127.0.0.1:1".parse().unwrap(), tx);
         let id = DeviceId::new();
         session.attach(id.clone(), "phone".into()).await;
-        assert_eq!(session.peer_id().0, session.peer_id().0);
-        assert_eq!(session.state.peer_count().await, 1);
+        assert_eq!(session.peer_id().0, id.0);
+        assert_eq!(state.peer_count().await, 1);
 
         session.send(Message::Ping { ts: 1 });
         assert!(rx.try_recv().is_ok());
 
         session.detach().await;
-        assert_eq!(session.state.peer_count().await, 0);
+        assert_eq!(state.peer_count().await, 0);
     }
 
     #[tokio::test]

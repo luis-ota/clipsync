@@ -17,6 +17,7 @@
 pub mod clipboard;
 pub mod config;
 pub mod discovery;
+pub mod dispatch;
 pub mod error;
 pub mod pairing;
 pub mod peer;
