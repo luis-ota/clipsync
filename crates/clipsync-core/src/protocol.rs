@@ -69,22 +69,22 @@ pub enum DeviceKind {
 }
 
 impl DeviceKind {
-    pub fn is_mobile(&self) -> bool {
-        matches!(self, Self::Android | Self::Ios)
-    }
-}
-
-impl fmt::Display for DeviceKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
+    /// Converte para string minúscula ("android", "linux", etc.).
+    pub fn as_str(&self) -> &'static str {
+        match self {
             Self::Android => "android",
             Self::Linux => "linux",
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Ios => "ios",
             Self::Other => "other",
-        };
-        f.write_str(s)
+        }
+    }
+}
+
+impl fmt::Display for DeviceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

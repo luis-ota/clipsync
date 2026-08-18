@@ -107,6 +107,10 @@ impl ConnectionInner {
 
         // Pareamento: se o device é confiado, aceita direto.
         // Caso contrário, inicia desafio de PIN.
+        //
+        // Ordem de locks: pairing Mutex primeiro, depois peers RwLock.
+        // Isso é consistente com o restante do código (add_peer,
+        // remove_peer, broadcast_except) e previne deadlocks.
         let trusted = {
             let pm = self.state.pairing.lock().await;
             device_id
@@ -116,9 +120,15 @@ impl ConnectionInner {
         };
 
         if trusted {
+            // device_id é Some() aqui porque trusted=true só é possível
+            // se is_trusted() retornou true, o que requer um id.
             let id = device_id.clone().unwrap();
             let name = {
                 let pm = self.state.pairing.lock().await;
+                // unwrap_or é seguro: device_name() retorna None apenas se
+                // o device não está no HashMap (não é trusted), mas acabamos
+                // de confirmar que é. Se retornar None por race, usamos o
+                // nome do handshake como fallback.
                 pm.device_name(&id).unwrap_or(&device_info.name).to_owned()
             };
             self.state.pairing.lock().await.mark_seen(&id);
@@ -219,6 +229,7 @@ impl ConnectionInner {
                                 &challenge_id,
                                 &nonce,
                                 &code,
+                                &device_info.kind.to_string(),
                             );
                             match result {
                                 Ok(id) => {

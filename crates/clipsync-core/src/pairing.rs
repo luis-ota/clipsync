@@ -8,6 +8,7 @@
 //! como pareado e passa a ser confiado nas conexões seguintes.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use rand::Rng;
@@ -118,15 +119,65 @@ impl TrustedStore {
 /// `start_challenge` invalida qualquer desafio anterior (mesmo não
 /// expirado), garantindo que `active_pin()` seja determinístico e que o
 /// PIN exibido no tray corresponda ao device que está pareando agora.
-#[derive(Debug, Default)]
+///
+/// Quando construído com [`PairingManager::new_with_store`], as
+/// alterações de confiança (submit, trust, untrust) são persistidas
+/// automaticamente em disco via [`TrustedStore`].
+#[derive(Default)]
 pub struct PairingManager {
     challenges: HashMap<String, PairChallenge>,
     trusted: HashMap<DeviceId, TrustedDevice>,
+    /// Se `Some`, alterações de confiança são persistidas neste path.
+    store_path: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for PairingManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairingManager")
+            .field("challenges", &self.challenges)
+            .field("trusted", &self.trusted)
+            .field("store_path", &self.store_path)
+            .finish()
+    }
 }
 
 impl PairingManager {
+    /// Cria um PairingManager sem persistência (útil para testes).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Cria um PairingManager com persistência em disco.
+    ///
+    /// Carrega o [`TrustedStore`] existente em `path` (arquivo ausente
+    /// => store vazio) e popula `self.trusted` a partir dele. Todas as
+    /// mutações de confiança (submit, trust, untrust) são automaticamente
+    /// salvas em `path`.
+    pub fn new_with_store(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let store = TrustedStore::load(&path)?;
+        let mut trusted = HashMap::new();
+        for dev in store.devices {
+            trusted.insert(dev.id.clone(), dev);
+        }
+        Ok(Self {
+            challenges: HashMap::new(),
+            trusted,
+            store_path: Some(path),
+        })
+    }
+
+    /// Persiste o estado atual de `self.trusted` em disco.
+    /// Chamado automaticamente após submit, trust e untrust quando
+    /// `store_path` está configurado.
+    fn persist(&self) -> Result<()> {
+        if let Some(path) = &self.store_path {
+            let store = TrustedStore {
+                devices: self.trusted.values().cloned().collect(),
+            };
+            store.save(path)?;
+        }
+        Ok(())
     }
 
     /// Cria um novo desafio para um device não-confiado.
@@ -156,12 +207,16 @@ impl PairingManager {
     }
 
     /// Valida a submissão de PIN. Consome uma tentativa.
+    ///
+    /// `kind` é a categoria do device (ex: "android", "linux", "ios"),
+    /// informada pelo client no handshake `hello`.
     pub fn submit(
         &mut self,
         device_name: &str,
         challenge_id: &str,
         nonce: &str,
         code: &str,
+        kind: &str,
     ) -> Result<DeviceId, PairFailReason> {
         let challenge = self
             .challenges
@@ -196,13 +251,15 @@ impl PairingManager {
         let trusted = TrustedDevice {
             id: dev_id.clone(),
             name: device_name.to_owned(),
-            kind: "android".to_owned(),
+            kind: kind.to_owned(),
             last_seen: now,
             paired_at: now,
             trusted: true,
         };
         self.trusted.insert(dev_id.clone(), trusted);
         self.challenges.remove(device_name);
+        // Persiste em disco se configurado.
+        let _ = self.persist();
         info!(device = %device_name, id = %dev_id, "device pareado");
         Ok(dev_id)
     }
@@ -221,6 +278,7 @@ impl PairingManager {
             trusted: true,
         };
         self.trusted.insert(id.clone(), trusted);
+        let _ = self.persist();
         info!(device = %name, id = %id, "device confiado via bootstrap");
         id
     }
@@ -251,7 +309,11 @@ impl PairingManager {
 
     /// Remove um device da lista de confiados.
     pub fn untrust(&mut self, id: &DeviceId) -> bool {
-        self.trusted.remove(id).is_some()
+        let removed = self.trusted.remove(id).is_some();
+        if removed {
+            let _ = self.persist();
+        }
+        removed
     }
 
     /// Retorna o PIN do desafio ativo (não expirado), se houver.
@@ -303,7 +365,7 @@ mod tests {
         let mut pm = PairingManager::new();
         let ch = pm.start_challenge("Pixel 8");
         let device_id = pm
-            .submit("Pixel 8", &ch.challenge_id, &ch.nonce, &ch.code)
+            .submit("Pixel 8", &ch.challenge_id, &ch.nonce, &ch.code, "android")
             .unwrap();
         assert!(pm.is_trusted(&device_id));
     }
@@ -312,7 +374,7 @@ mod tests {
     fn wrong_code_consumes_attempt() {
         let mut pm = PairingManager::new();
         let ch = pm.start_challenge("Pixel 8");
-        let r = pm.submit("Pixel 8", &ch.challenge_id, &ch.nonce, "000000");
+        let r = pm.submit("Pixel 8", &ch.challenge_id, &ch.nonce, "000000", "android");
         assert_eq!(r, Err(PairFailReason::InvalidCode));
         assert_eq!(pm.challenges["Pixel 8"].attempts_left, MAX_ATTEMPTS - 1);
     }
@@ -321,7 +383,7 @@ mod tests {
     fn wrong_nonce_rejected() {
         let mut pm = PairingManager::new();
         let ch = pm.start_challenge("Pixel 8");
-        let r = pm.submit("Pixel 8", &ch.challenge_id, "deadbeef", "000000");
+        let r = pm.submit("Pixel 8", &ch.challenge_id, "deadbeef", "000000", "android");
         assert_eq!(r, Err(PairFailReason::InvalidCode));
     }
 
@@ -329,7 +391,7 @@ mod tests {
     fn wrong_challenge_id_rejected() {
         let mut pm = PairingManager::new();
         let ch = pm.start_challenge("Pixel 8");
-        let r = pm.submit("Pixel 8", "ch-inexistente", &ch.nonce, &ch.code);
+        let r = pm.submit("Pixel 8", "ch-inexistente", &ch.nonce, &ch.code, "android");
         assert_eq!(r, Err(PairFailReason::InvalidCode));
         assert_eq!(pm.challenges["Pixel 8"].attempts_left, MAX_ATTEMPTS);
     }
@@ -353,7 +415,13 @@ mod tests {
         assert_eq!(pm.active_pin().as_deref(), Some(second.code.as_str()));
 
         // O desafio anterior foi invalidado: submissão do PIN antigo falha.
-        let r = pm.submit("Pixel 8", &first.challenge_id, &first.nonce, &first.code);
+        let r = pm.submit(
+            "Pixel 8",
+            &first.challenge_id,
+            &first.nonce,
+            &first.code,
+            "android",
+        );
         assert_eq!(r, Err(PairFailReason::Expired));
 
         // O desafio atual permanece válido e pareia normalmente.
@@ -363,6 +431,7 @@ mod tests {
                 &second.challenge_id,
                 &second.nonce,
                 &second.code,
+                "android",
             )
             .unwrap();
         assert!(pm.is_trusted(&dev_id));
@@ -442,5 +511,70 @@ mod tests {
             .map(|d| d.id.as_str())
             .collect();
         assert_eq!(ids, vec!["new", "old"]);
+    }
+
+    #[test]
+    fn persistence_survives_manager_reload() {
+        let dir = std::env::temp_dir().join(format!("clipsync-persist-{}", std::process::id()));
+        let path = dir.join("trusted.toml");
+        let _ = std::fs::remove_file(&path);
+
+        // 1) Pareia um device com persistência.
+        let mut pm = PairingManager::new_with_store(&path).unwrap();
+        let ch = pm.start_challenge("Pixel 8");
+        let device_id = pm
+            .submit("Pixel 8", &ch.challenge_id, &ch.nonce, &ch.code, "android")
+            .unwrap();
+        assert!(pm.is_trusted(&device_id));
+        let device_name = pm.device_name(&device_id).unwrap().to_owned();
+        drop(pm);
+
+        // 2) Cria um novo PairingManager a partir do mesmo path.
+        let pm2 = PairingManager::new_with_store(&path).unwrap();
+        assert!(
+            pm2.is_trusted(&device_id),
+            "device deve permanecer confiado após reload"
+        );
+        assert_eq!(pm2.device_name(&device_id).unwrap(), device_name);
+        assert_eq!(pm2.trusted_devices().len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn trust_and_untrust_persist() {
+        let dir = std::env::temp_dir().join(format!("clipsync-trust-{}", std::process::id()));
+        let path = dir.join("trusted.toml");
+        let _ = std::fs::remove_file(&path);
+
+        let mut pm = PairingManager::new_with_store(&path).unwrap();
+        let id = pm.trust("my-phone", "android");
+        drop(pm);
+
+        // Reload: trust persistido.
+        let pm2 = PairingManager::new_with_store(&path).unwrap();
+        assert!(pm2.is_trusted(&id));
+
+        // Untrust + reload.
+        let mut pm2 = pm2;
+        pm2.untrust(&id);
+        drop(pm2);
+
+        let pm3 = PairingManager::new_with_store(&path).unwrap();
+        assert!(!pm3.is_trusted(&id), "device removido deve sumir no reload");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn submit_propagates_kind() {
+        let mut pm = PairingManager::new();
+        let ch = pm.start_challenge("iPhone 15");
+        let device_id = pm
+            .submit("iPhone 15", &ch.challenge_id, &ch.nonce, &ch.code, "ios")
+            .unwrap();
+        let devices = pm.trusted_devices();
+        let device = devices.iter().find(|d| d.id == device_id).unwrap();
+        assert_eq!(device.kind, "ios", "kind deve ser propagado do submit");
     }
 }

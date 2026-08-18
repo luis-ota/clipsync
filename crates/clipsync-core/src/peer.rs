@@ -90,7 +90,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_and_send() {
-        let (state, _rx) = ServerState::new(crate::server::ServerConfig::default());
+        let (state, _rx) = ServerState::new(crate::server::ServerConfig::default(), None);
         let state = std::sync::Arc::new(state);
         let (tx, mut rx) = mpsc::channel(16);
         let mut session = PeerSession::new(state, "127.0.0.1:1".parse().unwrap(), tx);
@@ -108,7 +108,7 @@ mod tests {
 
     #[tokio::test]
     async fn detach_old_session_keeps_successor() {
-        let (state, _rx) = ServerState::new(crate::server::ServerConfig::default());
+        let (state, _rx) = ServerState::new(crate::server::ServerConfig::default(), None);
         let state = std::sync::Arc::new(state);
         let id = DeviceId::new();
 
