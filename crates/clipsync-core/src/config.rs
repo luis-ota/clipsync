@@ -106,6 +106,8 @@ pub struct ClipboardConfig {
     pub backend: String,
     /// Limite máximo de tamanho (bytes) para imagens.
     pub max_image_bytes: u64,
+    /// Limite máximo de tamanho (bytes) para texto e HTML.
+    pub max_text_bytes: u64,
     /// Intervalo de poll do watcher (ms).
     pub poll_interval_ms: u64,
 }
@@ -119,6 +121,7 @@ impl Default for ClipboardConfig {
             sync_files: false,
             backend: "auto".into(),
             max_image_bytes: 25 * 1024 * 1024,
+            max_text_bytes: 16 * 1024 * 1024,
             poll_interval_ms: 250,
         }
     }

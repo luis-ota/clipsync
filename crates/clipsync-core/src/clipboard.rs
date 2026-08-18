@@ -33,9 +33,20 @@ pub const MIME_HTML: &str = "text/html";
 /// coalescidas em um único evento (processa apenas a última).
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// Conteúdo rich text (HTML) associado a um snapshot.
+///
+/// Agrupa o conteúdo HTML e seu SHA-256, que antes eram campos
+/// separados (`html: Option<String>` + `html_sha256: Option<String>`)
+/// sempre preenchidos juntos.
+#[derive(Debug, Clone)]
+pub struct RichText {
+    pub html: String,
+    pub sha256: String,
+}
+
 /// Snapshot do clipboard num dado momento.
 ///
-/// O campo `html` carrega o conteúdo rich text (text/html) quando
+/// O campo `rich` carrega o conteúdo rich text (text/html) quando
 /// disponível no clipboard, além do conteúdo primário em `bytes`.
 /// Em Wayland isso vem de `wl-paste --type text/html`; em X11 e
 /// headless fica sempre `None` (sem suporte confiável a MIME seletivo).
@@ -44,12 +55,10 @@ pub struct ClipboardSnapshot {
     pub mime: String,
     pub bytes: Vec<u8>,
     pub sha256: String,
-    /// Conteúdo HTML quando o clipboard oferece `text/html` além do
-    /// texto plain. `None` em backends sem suporte a MIME seletivo.
-    pub html: Option<String>,
-    /// SHA-256 (hex) do conteúdo em `html`, quando presente. Usado
-    /// para dedup/anti-eco do rich text independente do texto plain.
-    pub html_sha256: Option<String>,
+    /// Conteúdo rich text (HTML + sha256) quando o clipboard oferece
+    /// `text/html` além do texto plain. `None` em backends sem suporte
+    /// a MIME seletivo.
+    pub rich: Option<RichText>,
 }
 
 impl ClipboardSnapshot {
@@ -59,8 +68,7 @@ impl ClipboardSnapshot {
             mime: mime.to_owned(),
             bytes,
             sha256,
-            html: None,
-            html_sha256: None,
+            rich: None,
         }
     }
 
@@ -70,8 +78,7 @@ impl ClipboardSnapshot {
             mime: mime.to_owned(),
             bytes,
             sha256,
-            html: None,
-            html_sha256: None,
+            rich: None,
         }
     }
 
@@ -80,7 +87,7 @@ impl ClipboardSnapshot {
     /// `bytes` carrega o texto plain alternativo (`alt`) quando
     /// disponível, servindo de fallback para backends que não
     /// suportam escrita seletiva de text/html. `sha256` é o hash do
-    /// HTML, espelhado em `html_sha256`.
+    /// HTML, armazenado em `rich.sha256`.
     pub fn new_html(html: String, alt: Option<String>, sha256: String) -> Self {
         let bytes = alt
             .map(|a| a.into_bytes())
@@ -89,8 +96,7 @@ impl ClipboardSnapshot {
             mime: MIME_HTML.to_owned(),
             bytes,
             sha256: sha256.clone(),
-            html: Some(html),
-            html_sha256: Some(sha256),
+            rich: Some(RichText { html, sha256 }),
         }
     }
 
@@ -104,7 +110,7 @@ impl ClipboardSnapshot {
 
     /// Conteúdo HTML quando disponível.
     pub fn html(&self) -> Option<&str> {
-        self.html.as_deref()
+        self.rich.as_ref().map(|r| r.html.as_str())
     }
 
     pub fn is_image(&self) -> bool {
@@ -113,16 +119,6 @@ impl ClipboardSnapshot {
 
     pub fn size(&self) -> usize {
         self.bytes.len()
-    }
-
-    /// Assinatura usada pelo watcher para detectar mudanças. Combina
-    /// o hash do conteúdo primário com o hash do HTML (se houver),
-    /// de forma que alterações só de formatação também disparam.
-    pub fn fingerprint(&self) -> String {
-        match &self.html_sha256 {
-            Some(h) => format!("{}|{}", self.sha256, h),
-            None => self.sha256.clone(),
-        }
     }
 }
 
@@ -346,12 +342,14 @@ impl ClipboardManager {
     }
 
     /// Anexa o conteúdo `text/html` ao snapshot quando disponível.
-    /// Se o mime primário já for HTML, espelha `bytes` em `html`.
+    /// Se o mime primário já for HTML, espelha `bytes` em `rich`.
     fn attach_html(snap: &mut ClipboardSnapshot) {
         if snap.mime == MIME_HTML {
             let html = String::from_utf8_lossy(&snap.bytes).into_owned();
-            snap.html_sha256 = Some(snap.sha256.clone());
-            snap.html = Some(html);
+            snap.rich = Some(RichText {
+                html,
+                sha256: snap.sha256.clone(),
+            });
             return;
         }
         if !snap.mime.starts_with("text/") {
@@ -365,8 +363,8 @@ impl ClipboardManager {
         match out {
             Ok(o) if o.status.success() && !o.stdout.is_empty() => {
                 let html = String::from_utf8_lossy(&o.stdout).into_owned();
-                snap.html_sha256 = Some(hex::encode(Sha256::digest(html.as_bytes())));
-                snap.html = Some(html);
+                let sha256 = hex::encode(Sha256::digest(html.as_bytes()));
+                snap.rich = Some(RichText { html, sha256 });
             }
             _ => debug!("sem conteúdo text/html no clipboard"),
         }
@@ -724,14 +722,16 @@ mod tests {
         assert_eq!(s.bytes, b"oi".to_vec());
         assert_eq!(s.html(), Some("<b>oi</b>"));
         assert_eq!(s.sha256, "sha123");
-        assert_eq!(s.html_sha256.as_deref(), Some("sha123"));
+        let rich = s.rich.as_ref().expect("rich text presente");
+        assert_eq!(rich.sha256, "sha123");
     }
 
     #[test]
     fn html_constructor_falls_back_to_html_bytes() {
         let s = ClipboardSnapshot::new_html("<b>oi</b>".into(), None, "sha123".into());
         assert_eq!(s.bytes, b"<b>oi</b>".to_vec());
-        assert_eq!(s.html_sha256.as_deref(), Some("sha123"));
+        let rich = s.rich.as_ref().expect("rich text presente");
+        assert_eq!(rich.sha256, "sha123");
     }
 
     #[test]
@@ -741,28 +741,31 @@ mod tests {
         let s3 = ClipboardManager::snapshot("text/plain", b"hellp".to_vec());
         assert_eq!(s1.sha256, s2.sha256);
         assert_ne!(s1.sha256, s3.sha256);
-        // Snapshots sem HTML têm fingerprint igual ao sha256.
-        assert_eq!(s1.fingerprint(), s1.sha256);
-        assert!(s1.html.is_none());
-        assert!(s1.html_sha256.is_none());
+        // Snapshots sem rich text não têm campo rich.
+        assert!(s1.rich.is_none());
     }
 
     #[test]
-    fn fingerprint_combines_text_and_html() {
-        let mut s = ClipboardManager::snapshot("text/plain", b"hello".to_vec());
-        s.html = Some("<b>hello</b>".into());
-        s.html_sha256 = Some(hex::encode(Sha256::digest(b"<b>hello</b>")));
-        let fp = s.fingerprint();
-        assert!(fp.starts_with(&s.sha256));
-        assert!(fp.contains('|'));
-        assert_ne!(fp, s.sha256);
+    fn rich_text_hash_differs_from_plain_text_hash() {
+        let s = ClipboardSnapshot::new_html(
+            "<b>hello</b>".into(),
+            Some("hello".into()),
+            hex::encode(Sha256::digest(b"<b>hello</b>")),
+        );
+        let plain = ClipboardManager::snapshot("text/plain", b"hello".to_vec());
+        // O sha256 do snapshot de HTML é o hash do HTML, não do alt.
+        assert_ne!(s.sha256, plain.sha256);
+        let rich = s.rich.as_ref().expect("rich text presente");
+        assert_eq!(rich.sha256, s.sha256);
     }
 
     #[test]
     fn html_accessor_returns_content() {
-        let mut s = ClipboardManager::snapshot("text/html", b"<b>x</b>".to_vec());
-        s.html = Some("<b>x</b>".into());
-        s.html_sha256 = Some(s.sha256.clone());
+        let s = ClipboardSnapshot::new_html(
+            "<b>x</b>".into(),
+            None,
+            ClipboardManager::snapshot("text/html", b"<b>x</b>".to_vec()).sha256,
+        );
         assert_eq!(s.html(), Some("<b>x</b>"));
         assert_eq!(s.text(), Some("<b>x</b>"));
     }
