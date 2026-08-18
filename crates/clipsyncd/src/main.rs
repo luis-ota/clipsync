@@ -71,7 +71,9 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
 
     // Clipboard manager
     let clipboard = ClipboardManager::new()?;
-    clipboard.check_tools().ok();
+    if let Err(e) = clipboard.check_tools() {
+        warn!(error = %e, "ferramentas de clipboard ausentes; modo headless");
+    }
     // O caminho peer→local compartilha o rastro de escrita própria com
     // o watcher: sem isso, o watcher veria a própria escrita como
     // mudança externa e ecoaria para todos os peers.
@@ -86,7 +88,9 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
         .next()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8765);
-    let _ = discovery.announce(&config.server.name, port);
+    if let Err(e) = discovery.announce(&config.server.name, port) {
+        warn!(error = %e, "falha anunciando serviço mDNS");
+    }
 
     // Watcher: clipboard local → peers (broadcast)
     // `origin` é o device_id persistido do daemon (estável por sessão),
@@ -463,7 +467,10 @@ async fn main() {
             }
         }
         None => {
-            cmd_run(Config::default(), false).await.ok();
+            if let Err(e) = cmd_run(Config::default(), false).await {
+                eprintln!("Erro: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }
