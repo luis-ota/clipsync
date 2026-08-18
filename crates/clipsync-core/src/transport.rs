@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn check_payload_size_rejects_oversized_text() {
         let config = crate::server::ServerConfig::default();
-        let (state, _rx) = crate::state::ServerState::new(config.clone());
+        let (state, _rx) = crate::state::ServerState::new(config.clone(), None);
         let state = std::sync::Arc::new(state);
         let conn = ConnectionInner {
             addr: "127.0.0.1:0".parse().unwrap(),

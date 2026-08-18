@@ -65,7 +65,7 @@ impl Discovery {
         let host = format!("{instance}.local");
         let type_full = SERVICE_TYPE;
         let ip = local_ip_v4()
-            .ok_or_else(|| Error::Other("não foi possível determinar o IP local IPv4".into()))?;
+            .ok_or_else(|| Error::Config("não foi possível determinar o IP local IPv4".into()))?;
 
         let properties: HashMap<String, String> = [
             ("version", env!("CARGO_PKG_VERSION").to_owned()),
