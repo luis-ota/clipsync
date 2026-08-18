@@ -161,6 +161,49 @@ impl BackendKind {
     }
 }
 
+/// Resultado da detecção de ferramentas de clipboard disponíveis no
+/// PATH. Fonte única de verdade — substitui as verificações
+/// duplicadas em `check_tools()` e `wl_paste_exists()`.
+#[derive(Debug, Clone, Default)]
+pub struct ClipboardTools {
+    pub wl_copy: bool,
+    pub wl_paste: bool,
+    pub xclip: bool,
+}
+
+impl ClipboardTools {
+    /// `true` se `wl-copy` e `wl-paste` estão presentes.
+    pub fn has_wayland(&self) -> bool {
+        self.wl_copy && self.wl_paste
+    }
+
+    /// `true` se `xclip` está presente.
+    pub fn has_x11(&self) -> bool {
+        self.xclip
+    }
+}
+
+/// Detecta quais ferramentas de clipboard estão disponíveis no PATH.
+///
+/// Função única de detecção — elimina a duplicação entre
+/// `ClipboardManager::check_tools()` e `wl_paste_exists()`.
+pub fn detect_clipboard_tools() -> ClipboardTools {
+    let available = |tool: &str| -> bool {
+        Command::new("which")
+            .arg(tool)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    ClipboardTools {
+        wl_copy: available("wl-copy"),
+        wl_paste: available("wl-paste"),
+        xclip: available("xclip"),
+    }
+}
+
 /// Rastro compartilhado da última escrita remota (anti-eco).
 ///
 /// Compartilhado entre a instância que roda o watcher e a que grava
@@ -258,30 +301,22 @@ impl ClipboardManager {
         self.backend
     }
 
-    /// Verifica se as ferramentas externas existem.
+    /// Verifica se as ferramentas externas necessárias ao backend
+    /// atual estão presentes no PATH. Usa [`detect_clipboard_tools`]
+    /// como fonte única de verdade.
     pub fn check_tools(&self) -> Result<()> {
+        let tools = detect_clipboard_tools();
         match self.backend {
-            BackendKind::Wayland => {
-                for tool in ["wl-paste", "wl-copy"] {
-                    if Command::new("which").arg(tool).output().is_err() {
-                        return Err(Error::Clipboard(format!(
-                            "{tool} não encontrado. Instale com: sudo pacman -S wl-clipboard"
-                        )));
-                    }
-                }
-            }
-            BackendKind::X11 => {
-                for tool in ["xclip", "xsel"] {
-                    if Command::new("which").arg(tool).output().is_err() {
-                        return Err(Error::Clipboard(format!(
-                            "{tool} não encontrado. Instale com: sudo pacman -S xclip"
-                        )));
-                    }
-                }
-            }
-            BackendKind::Headless => {}
+            BackendKind::Wayland if !tools.has_wayland() => Err(Error::Clipboard(
+                "wl-copy/wl-paste não encontrados. \
+                 Instale com: sudo pacman -S wl-clipboard"
+                    .into(),
+            )),
+            BackendKind::X11 if !tools.has_x11() => Err(Error::Clipboard(
+                "xclip não encontrado. Instale com: sudo pacman -S xclip".into(),
+            )),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     /// Lê o conteúdo atual do clipboard. Retorna `None` se vazio.
@@ -403,54 +438,14 @@ impl ClipboardManager {
     fn write(&mut self, mime: &str, bytes: &[u8], origin: WriteOrigin) -> Result<()> {
         match self.backend {
             BackendKind::Wayland => {
-                let mut child = Command::new("wl-copy")
-                    .arg("--type")
-                    .arg(mime)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| Error::Clipboard(format!("falha spawn wl-copy: {e}")))?;
-
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut() {
-                    stdin
-                        .write_all(bytes)
-                        .map_err(|e| Error::Clipboard(format!("falha escrevendo stdin: {e}")))?;
-                }
-                let out = child
-                    .wait_with_output()
-                    .map_err(|e| Error::Clipboard(format!("falha wait wl-copy: {e}")))?;
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    return Err(Error::Clipboard(format!(
-                        "wl-copy falhou: {}",
-                        stderr.trim()
-                    )));
-                }
+                let mut cmd = Command::new("wl-copy");
+                cmd.arg("--type").arg(mime);
+                run_backend_tool(&mut cmd, bytes, "wl-copy")?;
             }
             BackendKind::X11 => {
-                let mut child = Command::new("xclip")
-                    .args(["-selection", "clipboard", "-i"])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| Error::Clipboard(format!("falha spawn xclip: {e}")))?;
-
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut() {
-                    stdin
-                        .write_all(bytes)
-                        .map_err(|e| Error::Clipboard(format!("falha escrevendo stdin: {e}")))?;
-                }
-                let out = child
-                    .wait_with_output()
-                    .map_err(|e| Error::Clipboard(format!("falha wait xclip: {e}")))?;
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    return Err(Error::Clipboard(format!("xclip falhou: {}", stderr.trim())));
-                }
+                let mut cmd = Command::new("xclip");
+                cmd.args(["-selection", "clipboard", "-i"]);
+                run_backend_tool(&mut cmd, bytes, "xclip")?;
             }
             BackendKind::Headless => {
                 debug!("headless: ignorando write de {} bytes", bytes.len());
@@ -498,13 +493,41 @@ impl ClipboardManager {
     }
 }
 
+/// Executa uma ferramenta de clipboard, escrevendo `data` no stdin.
+///
+/// Centraliza o padrão spawn → piped stdin → write_all → wait_with_output
+/// usado por ambos os backends (wl-copy e xclip).
+fn run_backend_tool(cmd: &mut Command, data: &[u8], tool_name: &str) -> Result<()> {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Clipboard(format!("falha spawn {tool_name}: {e}")))?;
+
+    use std::io::Write;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(data)
+            .map_err(|e| Error::Clipboard(format!("falha escrevendo stdin: {e}")))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| Error::Clipboard(format!("falha wait {tool_name}: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(Error::Clipboard(format!(
+            "{tool_name} falhou: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Verifica se o binário `wl-paste` está disponível no PATH.
+/// Delega para [`detect_clipboard_tools`].
 fn wl_paste_exists() -> bool {
-    Command::new("which")
-        .arg("wl-paste")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    detect_clipboard_tools().wl_paste
 }
 
 /// Lê o clipboard e devolve `Some(snapshot)` apenas quando o
