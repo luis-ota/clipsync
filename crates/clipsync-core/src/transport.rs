@@ -320,6 +320,14 @@ impl ConnectionInner {
                                     Message::ClipboardText { .. }
                                     | Message::ClipboardImage { .. }
                                     | Message::ClipboardHtml { .. } => {
+                                        // Validação de tamanho ANTES de caps.
+                                        if let Err(e) = self.check_payload_size(&msg) {
+                                            session.send(Message::Error {
+                                                code: "payload_too_large".into(),
+                                                message: e.to_string(),
+                                            });
+                                            continue;
+                                        }
                                         match self.enforce_caps(&msg) {
                                             Ok(()) => {}
                                             Err(_) => {
@@ -342,11 +350,13 @@ impl ConnectionInner {
                                         // 1) Repassa para outros peers.
                                         self.state.broadcast_except(msg.clone(), Some(&origin)).await;
                                         // 2) Publica no canal local p/ o daemon gravar no clipboard.
-                                        let _ = self
-                                            .state
-                                            .local_events
-                                            .send(peer_snapshot(&msg))
-                                            .await;
+                                        if let Some(event) = peer_snapshot(&msg) {
+                                            let _ = self
+                                                .state
+                                                .local_events
+                                                .send(event)
+                                                .await;
+                                        }
                                     }
                                     other => {
                                         debug!(peer = %self.addr, msg = other.type_name(), "tipo não tratado");
@@ -402,38 +412,73 @@ impl ConnectionInner {
             Err(Error::Protocol("capability não habilitada".into()))
         }
     }
+
+    /// Valida o tamanho do payload de mensagens de clipboard antes de
+    /// processar. Previne DoS de memória de peers maliciosos.
+    fn check_payload_size(&self, msg: &Message) -> Result<()> {
+        let max_text = self.config.clipboard.max_text_bytes as usize;
+        let max_image = self.config.clipboard.max_image_bytes as usize;
+        // Base64 infla ~33%: 4 bytes base64 para cada 3 bytes binários.
+        let max_image_b64 = max_image * 4 / 3;
+
+        match msg {
+            Message::ClipboardText { content, .. } if content.len() > max_text => {
+                Err(Error::PayloadTooLarge {
+                    size: content.len(),
+                    max: max_text,
+                })
+            }
+            Message::ClipboardImage { data_b64, .. } if data_b64.len() > max_image_b64 => {
+                Err(Error::PayloadTooLarge {
+                    size: data_b64.len(),
+                    max: max_image_b64,
+                })
+            }
+            Message::ClipboardHtml { html, .. } if html.len() > max_text => {
+                Err(Error::PayloadTooLarge {
+                    size: html.len(),
+                    max: max_text,
+                })
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Converte uma mensagem de clipboard de um peer em um snapshot
-/// para o canal local.
-fn peer_snapshot(msg: &Message) -> crate::clipboard::ClipboardEvent {
+/// para o canal local. Retorna `None` para mensagens não-clipboard
+/// ou quando o decode de base64 falha.
+fn peer_snapshot(msg: &Message) -> Option<crate::clipboard::ClipboardEvent> {
     match msg {
-        Message::ClipboardText { content, .. } => crate::clipboard::ClipboardEvent::Changed(
+        Message::ClipboardText { content, .. } => Some(crate::clipboard::ClipboardEvent::Changed(
             Box::new(crate::clipboard::ClipboardSnapshot::new_text(
                 crate::clipboard::MIME_TEXT,
                 content.as_bytes().to_vec(),
                 sha_of(msg),
             )),
-        ),
+        )),
         Message::ClipboardImage { data_b64, mime, .. } => {
-            crate::clipboard::ClipboardEvent::Changed(Box::new(
-                crate::clipboard::ClipboardSnapshot::new_image(
-                    mime,
-                    base64::engine::general_purpose::STANDARD
-                        .decode(data_b64)
-                        .unwrap_or_default(),
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(error = %e, "base64 inválido em clipboard_image; ignorando");
+                    return None;
+                }
+            };
+            Some(crate::clipboard::ClipboardEvent::Changed(Box::new(
+                crate::clipboard::ClipboardSnapshot::new_image(mime, bytes, sha_of(msg)),
+            )))
+        }
+        Message::ClipboardHtml { html, alt, .. } => {
+            Some(crate::clipboard::ClipboardEvent::Changed(Box::new(
+                crate::clipboard::ClipboardSnapshot::new_html(
+                    html.clone(),
+                    alt.clone(),
                     sha_of(msg),
                 ),
-            ))
+            )))
         }
-        Message::ClipboardHtml { html, alt, .. } => crate::clipboard::ClipboardEvent::Changed(
-            Box::new(crate::clipboard::ClipboardSnapshot::new_html(
-                html.clone(),
-                alt.clone(),
-                sha_of(msg),
-            )),
-        ),
-        _ => unreachable!("apenas clipboard messages"),
+        _ => None,
     }
 }
 
@@ -460,11 +505,54 @@ mod tests {
             sha256: "abc".into(),
         };
         match peer_snapshot(&msg) {
-            crate::clipboard::ClipboardEvent::Changed(snap) => {
+            Some(crate::clipboard::ClipboardEvent::Changed(snap)) => {
                 assert_eq!(snap.text(), Some("hello"));
             }
-            _ => panic!("esperava Changed"),
+            _ => panic!("esperava Some(Changed)"),
         }
+    }
+
+    #[test]
+    fn peer_snapshot_returns_none_for_non_clipboard() {
+        let msg = Message::Ping { ts: 123 };
+        assert!(peer_snapshot(&msg).is_none(), "ping não gera snapshot");
+    }
+
+    #[test]
+    fn peer_snapshot_returns_none_for_invalid_base64() {
+        let msg = Message::ClipboardImage {
+            mime: "image/png".into(),
+            data_b64: "!!!invalid-base64!!!".into(),
+            width: None,
+            height: None,
+            sha256: "abc".into(),
+            origin: DeviceId::new(),
+        };
+        assert!(
+            peer_snapshot(&msg).is_none(),
+            "base64 inválido deve retornar None"
+        );
+    }
+
+    #[test]
+    fn check_payload_size_rejects_oversized_text() {
+        let config = crate::server::ServerConfig::default();
+        let (state, _rx) = crate::state::ServerState::new(config.clone());
+        let state = std::sync::Arc::new(state);
+        let conn = ConnectionInner {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            state,
+            config,
+        };
+
+        let big = "x".repeat(17 * 1024 * 1024); // > 16 MB
+        let msg = Message::ClipboardText {
+            mime: "text/plain".into(),
+            content: big,
+            origin: DeviceId::new(),
+            sha256: "abc".into(),
+        };
+        assert!(conn.check_payload_size(&msg).is_err());
     }
 
     #[test]

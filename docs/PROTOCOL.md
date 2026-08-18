@@ -109,7 +109,6 @@ CLIENT                            SERVER
 ```json
 {
   "type": "clipboard_text",
-  "v": 1,
   "mime": "text/plain;charset=utf-8",
   "content": "https://exemplo.com",
   "origin": "uuid-do-device",
@@ -125,7 +124,6 @@ no campo `data_b64`:
 ```json
 {
   "type": "clipboard_image",
-  "v": 1,
   "mime": "image/png",
   "data_b64": "iVBORw0KGgoAAAANSUhEUgAA…",
   "width": 1080,
@@ -144,7 +142,6 @@ Limite v0.1: 25 MB por imagem (configurável em `max_image_bytes`).
 ```json
 {
   "type": "clipboard_html",
-  "v": 1,
   "html": "<b>negrito</b>",
   "alt": "negrito",
   "origin": "uuid-do-device",
@@ -166,13 +163,13 @@ Limite v0.1: 25 MB por imagem (configurável em `max_image_bytes`).
 
 ## Keepalive
 
-O servidor envia `{"type":"ping","v":1}` a cada 30s e espera `pong` do
+O servidor envia `{"type":"ping"}` a cada 30s e espera `pong` do
 client. Client que não responder em 60s é considerado morto e
 desconectado.
 
 ```json
-{"type":"ping","v":1}
-{"type":"pong","v":1}
+{"type":"ping","ts":1234567890}
+{"type":"pong","ts":1234567890}
 ```
 
 ## Segurança (v0.1)

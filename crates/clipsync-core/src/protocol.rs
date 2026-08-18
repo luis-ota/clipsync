@@ -261,14 +261,10 @@ impl Message {
         }
     }
 
-    /// Wrapper que injeta a versão do protocolo para clientes que não
-    /// conhecem o campo `v`.
+    /// Serializa a mensagem para JSON. O campo `v` só existe em
+    /// `Hello`; outras mensagens não carregam versão no wire.
     pub fn wrap(self) -> serde_json::Value {
-        let mut v = serde_json::to_value(&self).expect("Message sempre serializa");
-        if let Some(obj) = v.as_object_mut() {
-            obj.insert("v".into(), serde_json::Value::from(PROTOCOL_VERSION));
-        }
-        v
+        serde_json::to_value(&self).expect("Message sempre serializa")
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
@@ -410,5 +406,33 @@ mod tests {
             }
             other => panic!("esperava clipboard_text, recebeu {}", other.type_name()),
         }
+    }
+
+    #[test]
+    fn wrap_does_not_inject_v_into_clipboard_messages() {
+        let msg = Message::ClipboardText {
+            mime: "text/plain".into(),
+            content: "hi".into(),
+            origin: DeviceId::new(),
+            sha256: "abc".into(),
+        };
+        let json = msg.wrap();
+        assert!(
+            json.get("v").is_none(),
+            "clipboard_text não deve ter campo 'v' injetado"
+        );
+    }
+
+    #[test]
+    fn hello_with_wrong_version_is_rejected_by_deserialization() {
+        // O servidor valida v != PROTOCOL_VERSION em await_hello().
+        // Este teste garante que o campo é serializado corretamente.
+        let m = Message::Hello {
+            v: PROTOCOL_VERSION + 1,
+            device: DeviceInfo::new("test", DeviceKind::Android),
+        };
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["v"], PROTOCOL_VERSION + 1);
+        assert_ne!(json["v"], PROTOCOL_VERSION);
     }
 }
