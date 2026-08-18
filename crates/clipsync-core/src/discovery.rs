@@ -56,11 +56,16 @@ impl Discovery {
     }
 
     /// Anuncia o serviço deste host com o nome dado.
+    ///
+    /// Retorna erro se não for possível determinar o IP local (por
+    /// exemplo, sem conectividade de rede), evitando anunciar
+    /// `127.0.0.1` que seria inacessível para outros hosts.
     pub fn announce(&self, name: &str, port: u16) -> Result<()> {
         let instance = sanitize_instance(name);
         let host = format!("{instance}.local");
         let type_full = SERVICE_TYPE;
-        let ip = local_ip_v4().unwrap_or(Ipv4Addr::LOCALHOST);
+        let ip = local_ip_v4()
+            .ok_or_else(|| Error::Other("não foi possível determinar o IP local IPv4".into()))?;
 
         let properties: HashMap<String, String> = [
             ("version", env!("CARGO_PKG_VERSION").to_owned()),
@@ -147,7 +152,8 @@ impl Discovery {
                 );
                 last_change = tokio::time::Instant::now();
                 debug!(services = seen.len(), "mDNS: serviço resolvido");
-            } else if matches!(ev, ServiceEvent::ServiceRemoved(..)) {
+            } else if let ServiceEvent::ServiceRemoved(_, ref fullname) = ev {
+                seen.remove(fullname);
                 last_change = tokio::time::Instant::now();
             }
 
@@ -211,5 +217,29 @@ mod tests {
         assert_eq!(sanitize_instance("luis arch"), "luis-arch");
         assert_eq!(sanitize_instance("---"), "clipsync-host");
         assert_eq!(sanitize_instance("a"), "a");
+    }
+
+    #[test]
+    fn local_ip_v4_never_returns_loopback() {
+        // Se a rede está disponível, deve retornar um IP não-loopback.
+        // Se não está, deve retornar None — mas nunca 127.0.0.1.
+        if let Some(ip) = local_ip_v4() {
+            assert!(!ip.is_loopback(), "local_ip_v4() retornou loopback: {ip}");
+        }
+        // None é aceitável em ambientes sem rede (CI headless).
+    }
+
+    #[test]
+    fn discovered_service_socket_addrs() {
+        let svc = DiscoveredService {
+            fullname: "test._clipsync._tcp.local.".into(),
+            instance: "test".into(),
+            port: 8765,
+            addrs: vec!["192.168.1.10".parse().unwrap()],
+            properties: Default::default(),
+        };
+        let addrs = svc.socket_addrs();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].port(), 8765);
     }
 }
