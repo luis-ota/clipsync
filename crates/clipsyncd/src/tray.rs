@@ -12,12 +12,12 @@
 //! deve falhar por causa do tray: use `--no-tray` ou `CLIPSYNC_NO_TRAY`
 //! para desativá-lo explicitamente.
 
+use std::fmt;
+
 use ksni::menu::StandardItem;
 use ksni::{MenuItem, ToolTip, Tray, TrayMethods};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
-
-use clipsync_core::clipboard::{ClipboardManager, WriteOrigin};
 
 /// Comandos enviados pelo tray para o daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,29 @@ pub enum TrayCommand {
     Quit,
 }
 
+/// Estado operacional do daemon, exibido no tray.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DaemonState {
+    /// O daemon está ativo e aceitando conexões.
+    Running,
+    /// O daemon está ocioso (sem peers conectados).
+    #[default]
+    Idle,
+    /// O daemon encontrou um erro.
+    #[allow(dead_code)]
+    Error,
+}
+
+impl fmt::Display for DaemonState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => f.write_str("rodando"),
+            Self::Idle => f.write_str("ocioso"),
+            Self::Error => f.write_str("erro"),
+        }
+    }
+}
+
 /// Snapshot de estado exibido pelo tray.
 #[derive(Debug, Clone, Default)]
 pub struct TrayStatus {
@@ -37,8 +60,8 @@ pub struct TrayStatus {
     pub peer_count: usize,
     /// PIN de pareamento ativo, se houver.
     pub pin: Option<String>,
-    /// Estado do daemon ("rodando", "ocioso", ...).
-    pub state: String,
+    /// Estado operacional do daemon.
+    pub state: DaemonState,
 }
 
 impl TrayStatus {
@@ -156,8 +179,8 @@ pub fn shutdown(handle: &TrayHandle) {
 }
 
 /// Exibe o PIN atual: tenta notificação freedesktop (libnotify); em caso
-/// de falha copia para o clipboard local; em última instância apenas
-/// loga. Nunca propaga erro.
+/// de falha apenas loga. NUNCA copia para o clipboard (vazaria o PIN
+/// para peers via o watcher). Nunca propaga erro.
 pub async fn show_pin(pin: Option<String>) {
     let body = pin.unwrap_or_else(|| "Nenhum PIN ativo".to_string());
     if notify_rust::Notification::new()
@@ -169,12 +192,8 @@ pub async fn show_pin(pin: Option<String>) {
     {
         return;
     }
-    let mut cm = ClipboardManager::new().unwrap_or_else(|_| ClipboardManager::headless());
-    if cm.write_text(&body, WriteOrigin::Local).is_ok() {
-        info!(pin = %body, "PIN copiado para o clipboard (notificação indisponível)");
-    } else {
-        info!(pin = %body, "PIN (notificação e clipboard indisponíveis)");
-    }
+    // Fallback: apenas loga. NUNCA copia para clipboard (vazaria para peers).
+    info!(pin = %body, "PIN (notificação indisponível; exibindo apenas no log)");
 }
 
 /// Notifica (ou loga, como fallback) a lista de peers conectados.
@@ -202,7 +221,7 @@ mod tests {
         let s = TrayStatus {
             peer_count: 2,
             pin: Some("123456".into()),
-            state: "rodando".into(),
+            state: DaemonState::Running,
         };
         assert!(s.status_label().contains("2 peer(s)"));
         assert!(s.status_label().contains("123456"));
@@ -214,7 +233,7 @@ mod tests {
         let s = TrayStatus {
             peer_count: 0,
             pin: None,
-            state: "ocioso".into(),
+            state: DaemonState::Idle,
         };
         assert!(s.status_label().contains("PIN: nenhum"));
         assert!(s.status_label().contains("0 peer(s)"));
@@ -225,11 +244,33 @@ mod tests {
         let s = TrayStatus {
             peer_count: 1,
             pin: Some("999999".into()),
-            state: "rodando".into(),
+            state: DaemonState::Running,
         };
         let tip = s.tooltip_description();
         assert!(tip.starts_with("clipsyncd\n"));
         assert!(tip.contains("999999"));
+    }
+
+    #[test]
+    fn daemon_state_display() {
+        assert_eq!(DaemonState::Running.to_string(), "rodando");
+        assert_eq!(DaemonState::Idle.to_string(), "ocioso");
+        assert_eq!(DaemonState::Error.to_string(), "erro");
+    }
+
+    #[test]
+    fn daemon_state_default_is_idle() {
+        assert_eq!(DaemonState::default(), DaemonState::Idle);
+    }
+
+    #[tokio::test]
+    async fn show_pin_does_not_touch_clipboard() {
+        // show_pin deve apenas tentar notificação e, se falhar, logar.
+        // NUNCA deve copiar o PIN para o clipboard.
+        // Em ambiente headless a notificação falha e caímos no fallback
+        // de log — ambas as ramificações são seguras.
+        show_pin(Some("test-pin".into())).await;
+        show_pin(None).await;
     }
 
     #[tokio::test]

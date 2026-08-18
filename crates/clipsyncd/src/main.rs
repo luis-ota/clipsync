@@ -71,7 +71,9 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
 
     // Clipboard manager
     let clipboard = ClipboardManager::new()?;
-    clipboard.check_tools().ok();
+    if let Err(e) = clipboard.check_tools() {
+        warn!(error = %e, "ferramentas de clipboard ausentes; modo headless");
+    }
     // O caminho peer→local compartilha o rastro de escrita própria com
     // o watcher: sem isso, o watcher veria a própria escrita como
     // mudança externa e ecoaria para todos os peers.
@@ -86,7 +88,9 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
         .next()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8765);
-    let _ = discovery.announce(&config.server.name, port);
+    if let Err(e) = discovery.announce(&config.server.name, port) {
+        warn!(error = %e, "falha anunciando serviço mDNS");
+    }
 
     // Watcher: clipboard local → peers (broadcast)
     // `origin` é o device_id persistido do daemon (estável por sessão),
@@ -209,7 +213,7 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
                         let status = tray::TrayStatus {
                             peer_count,
                             pin,
-                            state: "rodando".to_string(),
+                            state: tray::DaemonState::Running,
                         };
                         tray::update(&handle_for_updater, status).await;
                     }
@@ -305,11 +309,15 @@ async fn cmd_discover(timeout_secs: u64) -> Result<(), Box<dyn std::error::Error
 }
 
 fn cmd_show_pin() {
-    if let Some(pin) = read_current_pin() {
-        println!("PIN atual: {pin}");
-    } else {
-        eprintln!("Nenhum PIN disponível. Rode 'clipsyncd run' para gerar um.");
-    }
+    // O PIN vive em memória no PairingManager dentro do daemon em
+    // execução. Offline não é possível consultá-lo. O tray (menu de
+    // bandeja) consegue exibir o PIN diretamente do daemon via canal
+    // interno — use-o ou rode `clipsyncd run` e observe o log.
+    eprintln!(
+        "O PIN só está disponível enquanto o daemon está rodando.\n\
+         Use o menu de bandeja (clique direito no ícone → Mostrar PIN)\n\
+         ou rode 'clipsyncd run' e observe o log do PIN no startup."
+    );
 }
 
 /// Path do arquivo de devices confiados, ou encerra com erro.
@@ -421,19 +429,6 @@ WantedBy=default.target
     println!("  systemctl --user enable --now clipsyncd");
 }
 
-/// Lê o PIN corrente do file de runtime se existir.
-fn read_current_pin() -> Option<String> {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
-    let pin_path = std::path::Path::new(&runtime_dir).join("clipsync-pin");
-    if pin_path.exists() {
-        std::fs::read_to_string(&pin_path)
-            .ok()
-            .map(|s| s.trim().to_owned())
-    } else {
-        None
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -464,7 +459,10 @@ async fn main() {
             }
         }
         None => {
-            cmd_run(Config::default(), false).await.ok();
+            if let Err(e) = cmd_run(Config::default(), false).await {
+                eprintln!("Erro: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }
