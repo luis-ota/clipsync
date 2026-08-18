@@ -578,12 +578,12 @@ async fn wrong_pin_returns_pair_fail_with_invalid_code() {
             other => panic!("esperava pair_challenge, recebeu {}", other.type_name()),
         };
 
-        // Submete PIN errado ("999999" — nunca gerado; primeiro dígito != 0).
+        // Submete PIN errado ("000000" — impossível; gerador usa 100_000..=999_999).
         send_json(
             &mut ws,
             Message::PairSubmit {
                 challenge_id,
-                code: "999999".into(),
+                code: "000000".into(),
                 nonce,
             },
         )
@@ -622,10 +622,16 @@ async fn trusted_device_skips_pairing() {
         let device_id = pair_new_client(&mut ws1, &state).await;
         assert_eq!(state.peer_count().await, 1);
 
-        // 2) Fecha a primeira conexão.
+        // 2) Fecha a primeira conexão e aguarda remoção determinística.
         drop(ws1);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(state.peer_count().await, 0);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while state.peer_count().await > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timeout aguardando peer_count() chegar a 0"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         // 3) Reconecta como device confiado: deve receber PairOk direto.
         let mut ws2 = connect_as_trusted(&addr, &device_id, "trusted-reconnect").await;

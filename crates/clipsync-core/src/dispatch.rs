@@ -9,7 +9,9 @@
 //! - [`apply_peer_snapshot`]: snapshot recebido de um peer → escrita
 //!   no clipboard local (rede → clipboard).
 //!
-//! Ambas são puras e testáveis sem dependência de I/O de rede.
+//! `event_to_message` é pura e testável sem I/O. `apply_peer_snapshot`
+//! escreve no clipboard local (via `ClipboardManager`) mas é testável
+//! em modo headless sem dependência de rede.
 
 use crate::clipboard::{ClipboardManager, ClipboardSnapshot, WriteOrigin, MIME_HTML};
 use crate::config::ClipboardConfig;
