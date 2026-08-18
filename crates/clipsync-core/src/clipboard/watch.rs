@@ -10,7 +10,7 @@
 //! changes within [`DEBOUNCE`] into a single [`ClipboardEvent`].
 
 use std::pin::Pin;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
@@ -31,12 +31,9 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 // ---------------------------------------------------------------------------
 
 /// Verifica se o binário `wl-paste` está disponível no PATH.
+/// Delega para [`super::detect_clipboard_tools`] — fonte única de verdade.
 pub(super) fn wl_paste_exists() -> bool {
-    Command::new("which")
-        .arg("wl-paste")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    super::detect_clipboard_tools().wl_paste
 }
 
 /// Lê o clipboard e devolve `Some(snapshot)` apenas quando o
