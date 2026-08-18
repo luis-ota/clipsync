@@ -495,3 +495,387 @@ async fn recv_message(ws: &mut WsStream) -> Message {
         }
     }
 }
+
+// ============================================================
+// Novos helpers para os cenários adicionados (#44)
+// ============================================================
+
+/// Conecta como device confiado (com `device_id` conhecido) e envia
+/// `hello`. O servidor deve responder `PairOk` direto, sem passar
+/// pelo fluxo de PIN.
+async fn connect_as_trusted(addr: &SocketAddr, device_id: &DeviceId, name: &str) -> WsStream {
+    let url = format!("ws://{addr}/ws");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("client conectou no ws");
+    let mut device = DeviceInfo::new(name.to_owned(), DeviceKind::Linux)
+        .with_app_version("clipsync-harness 0.1.0")
+        .with_capabilities(Capabilities {
+            text: true,
+            ..Capabilities::default()
+        });
+    device.id = Some(device_id.clone());
+    send_json(
+        &mut ws,
+        Message::Hello {
+            v: PROTOCOL_VERSION,
+            device,
+        },
+    )
+    .await;
+    ws
+}
+
+/// Recebe a próxima mensagem de aplicação ou `None` se a conexão
+/// for fechada (timeout, EOF, erro ou frame Close). Útil para
+/// cenários onde o servidor fecha a conexão e queremos detectar
+/// sem panic.
+async fn recv_message_or_close(ws: &mut WsStream) -> Option<Message> {
+    loop {
+        let result = tokio::time::timeout(OP_TIMEOUT, ws.next()).await;
+        let item = match result {
+            Ok(Some(item)) => item,
+            Ok(None) => return None,
+            Err(_) => return None,
+        };
+        let ws_msg = match item {
+            Ok(m) => m,
+            Err(_) => return None,
+        };
+        match ws_msg {
+            WsMessage::Text(text) => {
+                let msg: Message = match serde_json::from_str(&text) {
+                    Ok(m) => m,
+                    Err(_) => return None,
+                };
+                match msg {
+                    Message::Ping { .. } | Message::Pong { .. } => continue,
+                    other => return Some(other),
+                }
+            }
+            WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_) => continue,
+            WsMessage::Close(_) | WsMessage::Binary(_) => return None,
+        }
+    }
+}
+
+// ============================================================
+// #44 — Cenário 1: PIN errado → PairFail + InvalidCode
+// ============================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wrong_pin_returns_pair_fail_with_invalid_code() {
+    run_test(|addr, state, _local_rx| async move {
+        let device_name = format!("harness-wrong-pin-{}", uuid::Uuid::new_v4());
+        let mut ws = connect_and_hello(&addr, &device_name).await;
+
+        let (challenge_id, nonce) = match recv_message(&mut ws).await {
+            Message::PairChallenge {
+                challenge_id,
+                nonce,
+                ..
+            } => (challenge_id, nonce),
+            other => panic!("esperava pair_challenge, recebeu {}", other.type_name()),
+        };
+
+        // Submete PIN errado ("999999" — nunca gerado; primeiro dígito != 0).
+        send_json(
+            &mut ws,
+            Message::PairSubmit {
+                challenge_id,
+                code: "999999".into(),
+                nonce,
+            },
+        )
+        .await;
+
+        match recv_message(&mut ws).await {
+            Message::PairFail { reason, message } => {
+                assert_eq!(reason, PairFailReason::InvalidCode);
+                assert!(!message.is_empty(), "PairFail message não pode ser vazia");
+            }
+            other => panic!("esperava pair_fail, recebeu {}", other.type_name()),
+        }
+
+        // O servidor NÃO deve ter registrado peer após falha de pareamento.
+        assert_eq!(
+            state.peer_count().await,
+            0,
+            "nenhum peer após pareamento falho"
+        );
+    })
+    .await;
+}
+
+// ============================================================
+// #44 — Cenário 2: Device confiado pula pareamento
+// ============================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_device_skips_pairing() {
+    run_test(|addr, state, _local_rx| async move {
+        // 1) Primeira conexão: handshake completo → obtém device_id.
+        let url = format!("ws://{addr}/ws");
+        let (mut ws1, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("client conectou no ws");
+        let device_id = pair_new_client(&mut ws1, &state).await;
+        assert_eq!(state.peer_count().await, 1);
+
+        // 2) Fecha a primeira conexão.
+        drop(ws1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(state.peer_count().await, 0);
+
+        // 3) Reconecta como device confiado: deve receber PairOk direto.
+        let mut ws2 = connect_as_trusted(&addr, &device_id, "trusted-reconnect").await;
+        match recv_message(&mut ws2).await {
+            Message::PairOk {
+                device_id: did,
+                session_id,
+                server_name,
+                capabilities,
+            } => {
+                assert_eq!(did, device_id, "mesmo device_id no reconnect confiado");
+                assert!(!session_id.is_empty(), "session_id presente");
+                assert_eq!(server_name, "linux-desktop");
+                assert!(capabilities.text, "text habilitado");
+            }
+            other => panic!(
+                "esperava pair_ok no reconnect confiado, recebeu {}",
+                other.type_name()
+            ),
+        }
+
+        assert_eq!(state.peer_count().await, 1);
+        assert!(
+            state.pairing.lock().await.is_trusted(&device_id),
+            "device permanece confiado após reconnect"
+        );
+    })
+    .await;
+}
+
+// ============================================================
+// #44 — Cenário 3: Anti-eco com 2 clients
+// ============================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_clients_anti_echo() {
+    run_test(|addr, state, _local_rx| async move {
+        // Pareia dois clients.
+        let url = format!("ws://{addr}/ws");
+        let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("client A conectou");
+        let device_a = pair_new_client(&mut ws_a, &state).await;
+
+        let (mut ws_b, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("client B conectou");
+        let device_b = pair_new_client(&mut ws_b, &state).await;
+
+        assert_ne!(device_a, device_b, "pareamentos geram ids distintos");
+        assert_eq!(state.peer_count().await, 2);
+
+        // Client A envia clipboard_text.
+        let content = "texto anti-eco de A";
+        let sha = sha256_hex(content);
+        send_json(
+            &mut ws_a,
+            Message::ClipboardText {
+                mime: MIME_TEXT.to_owned(),
+                content: content.to_owned(),
+                origin: device_a.clone(),
+                sha256: sha.clone(),
+            },
+        )
+        .await;
+
+        // Client B DEVE receber a mensagem.
+        match recv_message(&mut ws_b).await {
+            Message::ClipboardText {
+                content: c,
+                origin,
+                sha256,
+                ..
+            } => {
+                assert_eq!(c, content);
+                assert_eq!(
+                    origin, device_a,
+                    "origin deve ser o device_id autenticado de A"
+                );
+                assert_eq!(sha256, sha);
+            }
+            other => panic!("B esperava clipboard_text, recebeu {}", other.type_name()),
+        }
+
+        // Client A NÃO deve receber sua própria mensagem de volta (anti-eco).
+        let a_echo = tokio::time::timeout(Duration::from_secs(1), recv_message(&mut ws_a)).await;
+        assert!(
+            a_echo.is_err(),
+            "A não deve receber seu próprio clipboard_text de volta (anti-eco)"
+        );
+    })
+    .await;
+}
+
+// ============================================================
+// #44 — Cenário 4: Frames malformados
+// ============================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_frames_handled_gracefully() {
+    // 4a: JSON inválido antes do hello → servidor fecha conexão (sem panic).
+    run_test(|addr, _state, _local_rx| async move {
+        let url = format!("ws://{addr}/ws");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("conectou");
+
+        ws.send(WsMessage::Text("not valid json!!!".into()))
+            .await
+            .expect("enviou lixo");
+
+        // Servidor deve fechar a conexão graciosamente.
+        let result = recv_message_or_close(&mut ws).await;
+        assert!(
+            result.is_none(),
+            "conexão deve fechar após JSON inválido antes do hello"
+        );
+    })
+    .await;
+
+    // 4b: Tipo de mensagem errado antes do hello → servidor fecha conexão.
+    run_test(|addr, _state, _local_rx| async move {
+        let url = format!("ws://{addr}/ws");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("conectou");
+
+        // Envia clipboard_text antes do hello (tipo errado no estágio errado).
+        send_json(
+            &mut ws,
+            Message::ClipboardText {
+                mime: MIME_TEXT.to_owned(),
+                content: "too early".into(),
+                origin: DeviceId::new(),
+                sha256: "abc".into(),
+            },
+        )
+        .await;
+
+        let result = recv_message_or_close(&mut ws).await;
+        assert!(
+            result.is_none(),
+            "conexão deve fechar quando tipo errado enviado antes do hello"
+        );
+    })
+    .await;
+
+    // 4c: JSON inválido durante message loop → servidor ignora e continua.
+    run_test(|addr, state, mut local_rx| async move {
+        let url = format!("ws://{addr}/ws");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("conectou");
+        let _device_id = pair_new_client(&mut ws, &state).await;
+
+        // Envia JSON inválido.
+        ws.send(WsMessage::Text("{broken json".into()))
+            .await
+            .expect("enviou lixo");
+
+        // Servidor deve ignorar o frame ruim e continuar processando.
+        // Envia um clipboard_text válido; se o servidor não crashou,
+        // ele publica no canal local_events.
+        let content = "still working after bad json";
+        let sha = sha256_hex(content);
+        send_json(
+            &mut ws,
+            Message::ClipboardText {
+                mime: MIME_TEXT.to_owned(),
+                content: content.to_owned(),
+                origin: DeviceId::new(),
+                sha256: sha.clone(),
+            },
+        )
+        .await;
+
+        let event = tokio::time::timeout(OP_TIMEOUT, local_rx.recv())
+            .await
+            .expect("server publicou no canal local dentro do timeout")
+            .expect("canal local_events não foi fechado");
+        match event {
+            ClipboardEvent::Changed(snap) => {
+                assert_eq!(snap.text(), Some(content));
+                assert_eq!(snap.sha256, sha);
+            }
+            ClipboardEvent::BackendLost(e) => panic!("BackendLost inesperado: {e}"),
+        }
+    })
+    .await;
+}
+
+// ============================================================
+// #44 — Cenário 5: Reconexão substitui sessão antiga
+// ============================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconnect_supersedes_old_session() {
+    run_test(|addr, state, _local_rx| async move {
+        // 1) Conecta e pareia client A.
+        let url = format!("ws://{addr}/ws");
+        let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("client A conectou");
+        let device_id = pair_new_client(&mut ws_a, &state).await;
+        assert_eq!(state.peer_count().await, 1);
+
+        // 2) Spawn task para ler o erro "superseded" de ws_a.
+        let a_handle = tokio::spawn(async move { recv_message(&mut ws_a).await });
+        tokio::task::yield_now().await;
+
+        // 3) Conecta client B com o MESMO device_id (trusted).
+        let mut ws_b = connect_as_trusted(&addr, &device_id, "reconnect-B").await;
+
+        // 4) ws_a deve receber Error { code: "superseded" }.
+        let a_result = tokio::time::timeout(TEST_TIMEOUT, a_handle)
+            .await
+            .expect("ws_a task excedeu timeout")
+            .expect("ws_a task paniquei");
+        match a_result {
+            Message::Error { code, message } => {
+                assert_eq!(code, "superseded");
+                assert!(
+                    !message.is_empty(),
+                    "mensagem de superseded não pode ser vazia"
+                );
+            }
+            other => panic!(
+                "esperava superseded na sessão antiga, recebeu {}",
+                other.type_name()
+            ),
+        }
+
+        // 5) ws_b deve receber PairOk e funcionar normalmente.
+        match recv_message(&mut ws_b).await {
+            Message::PairOk {
+                device_id: did,
+                session_id,
+                ..
+            } => {
+                assert_eq!(did, device_id, "mesmo device_id na nova sessão");
+                assert!(!session_id.is_empty(), "session_id presente");
+            }
+            other => panic!(
+                "esperava pair_ok no reconnect, recebeu {}",
+                other.type_name()
+            ),
+        }
+
+        // Apenas a nova sessão deve estar registrada.
+        assert_eq!(state.peer_count().await, 1);
+    })
+    .await;
+}
