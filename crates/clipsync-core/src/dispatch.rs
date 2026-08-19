@@ -69,18 +69,26 @@ pub fn event_to_message(
 ///
 /// Lida com fallback: se a escrita de HTML falhar (ex: backend sem
 /// suporte a MIME seletivo), cai para texto plain.
-pub fn apply_peer_snapshot(snap: &ClipboardSnapshot, cm: &mut ClipboardManager) {
+pub async fn apply_peer_snapshot(snap: &ClipboardSnapshot, cm: &mut ClipboardManager) {
     if snap.mime == MIME_HTML {
         if let Some(rich) = &snap.rich {
-            if cm.write_html(&rich.html, WriteOrigin::Remote).is_err() {
+            if cm
+                .write_html(&rich.html, WriteOrigin::Remote)
+                .await
+                .is_err()
+            {
                 let fallback = snap.text().unwrap_or(&rich.html);
-                let _ = cm.write_text(fallback, WriteOrigin::Remote);
+                let _ = cm.write_text(fallback, WriteOrigin::Remote).await;
             }
         }
     } else if snap.mime.starts_with("text/") {
-        let _ = cm.write_text(snap.text().unwrap_or_default(), WriteOrigin::Remote);
+        let _ = cm
+            .write_text(snap.text().unwrap_or_default(), WriteOrigin::Remote)
+            .await;
     } else if snap.mime.starts_with("image/") {
-        let _ = cm.write_image(&snap.mime, &snap.bytes, WriteOrigin::Remote);
+        let _ = cm
+            .write_image(&snap.mime, &snap.bytes, WriteOrigin::Remote)
+            .await;
     }
 }
 
@@ -245,31 +253,31 @@ mod tests {
 
     // ---- apply_peer_snapshot tests ----
 
-    #[test]
-    fn apply_text_snapshot_writes_to_clipboard() {
+    #[tokio::test]
+    async fn apply_text_snapshot_writes_to_clipboard() {
         let snap = ClipboardSnapshot::new_text(MIME_TEXT, b"peer text".to_vec(), "hash".into());
         let mut cm = ClipboardManager::headless();
-        apply_peer_snapshot(&snap, &mut cm);
+        apply_peer_snapshot(&snap, &mut cm).await;
         // Headless: write é no-op, mas não deve panicar.
     }
 
-    #[test]
-    fn apply_image_snapshot_writes_to_clipboard() {
+    #[tokio::test]
+    async fn apply_image_snapshot_writes_to_clipboard() {
         let snap = ClipboardSnapshot::new_image(MIME_PNG, vec![0x89, 0x50], "hash".into());
         let mut cm = ClipboardManager::headless();
-        apply_peer_snapshot(&snap, &mut cm);
+        apply_peer_snapshot(&snap, &mut cm).await;
     }
 
-    #[test]
-    fn apply_html_snapshot_writes_to_clipboard() {
+    #[tokio::test]
+    async fn apply_html_snapshot_writes_to_clipboard() {
         let snap =
             ClipboardSnapshot::new_html("<p>html</p>".into(), Some("html".into()), "hash".into());
         let mut cm = ClipboardManager::headless();
-        apply_peer_snapshot(&snap, &mut cm);
+        apply_peer_snapshot(&snap, &mut cm).await;
     }
 
-    #[test]
-    fn apply_html_without_rich_text_does_nothing() {
+    #[tokio::test]
+    async fn apply_html_without_rich_text_does_nothing() {
         // MIME_HTML mas sem rich: não deve panicar.
         let snap = ClipboardSnapshot {
             mime: MIME_HTML.to_owned(),
@@ -278,11 +286,11 @@ mod tests {
             rich: None,
         };
         let mut cm = ClipboardManager::headless();
-        apply_peer_snapshot(&snap, &mut cm);
+        apply_peer_snapshot(&snap, &mut cm).await;
     }
 
-    #[test]
-    fn apply_unknown_mime_does_nothing() {
+    #[tokio::test]
+    async fn apply_unknown_mime_does_nothing() {
         let snap = ClipboardSnapshot {
             mime: "application/octet-stream".into(),
             bytes: vec![0x00],
@@ -290,6 +298,6 @@ mod tests {
             rich: None,
         };
         let mut cm = ClipboardManager::headless();
-        apply_peer_snapshot(&snap, &mut cm);
+        apply_peer_snapshot(&snap, &mut cm).await;
     }
 }

@@ -73,7 +73,7 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
 
     // Clipboard manager
     let clipboard = ClipboardManager::new()?;
-    if let Err(e) = clipboard.check_tools() {
+    if let Err(e) = clipboard.check_tools().await {
         warn!(error = %e, "ferramentas de clipboard ausentes; modo headless");
     }
     // O caminho peer→local compartilha o rastro de escrita própria com
@@ -119,7 +119,7 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
         while let Some(evt) = peer_events_rx.recv().await {
             match evt {
                 ClipboardEvent::Changed(snap) => {
-                    dispatch::apply_peer_snapshot(&snap, &mut cm);
+                    dispatch::apply_peer_snapshot(&snap, &mut cm).await;
                 }
                 ClipboardEvent::BackendLost(e) => {
                     warn!(error = %e, "backend perdido no fluxo peer→local");

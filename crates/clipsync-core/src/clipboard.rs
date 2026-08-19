@@ -163,21 +163,27 @@ impl ClipboardTools {
 ///
 /// Função única de detecção — elimina a duplicação entre
 /// `ClipboardManager::check_tools()` e `wl_paste_exists()`.
-pub fn detect_clipboard_tools() -> ClipboardTools {
-    let available = |tool: &str| -> bool {
-        Command::new("which")
-            .arg(tool)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    };
-    ClipboardTools {
-        wl_copy: available("wl-copy"),
-        wl_paste: available("wl-paste"),
-        xclip: available("xclip"),
-    }
+///
+/// Usa `spawn_blocking` porque invoca `which` (processo bloqueante).
+pub async fn detect_clipboard_tools() -> ClipboardTools {
+    tokio::task::spawn_blocking(|| {
+        let available = |tool: &str| -> bool {
+            Command::new("which")
+                .arg(tool)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        ClipboardTools {
+            wl_copy: available("wl-copy"),
+            wl_paste: available("wl-paste"),
+            xclip: available("xclip"),
+        }
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Rastro compartilhado da última escrita remota (anti-eco).
@@ -256,8 +262,8 @@ impl ClipboardManager {
     /// Verifica se as ferramentas externas necessárias ao backend
     /// atual estão presentes no PATH. Usa [`detect_clipboard_tools`]
     /// como fonte única de verdade.
-    pub fn check_tools(&self) -> Result<()> {
-        let tools = detect_clipboard_tools();
+    pub async fn check_tools(&self) -> Result<()> {
+        let tools = detect_clipboard_tools().await;
         match self.backend {
             BackendKind::Wayland if !tools.has_wayland() => Err(Error::Clipboard(
                 "wl-copy/wl-paste não encontrados. \
@@ -274,14 +280,29 @@ impl ClipboardManager {
     /// Lê o conteúdo atual do clipboard. Retorna `None` se vazio.
     ///
     /// Em Wayland, tenta `text/html` como complemento ao texto plain.
-    pub fn read(&mut self, preferred_mimes: &[&str]) -> Result<Option<ClipboardSnapshot>> {
-        match self.backend {
+    ///
+    /// Usa `spawn_blocking` para não bloquear o runtime async.
+    pub async fn read(&mut self, preferred_mimes: &[&str]) -> Result<Option<ClipboardSnapshot>> {
+        let backend = self.backend;
+        let mimes: Vec<String> = preferred_mimes.iter().map(|m| (*m).to_owned()).collect();
+        tokio::task::spawn_blocking(move || Self::read_blocking(backend, &mimes))
+            .await
+            .map_err(|e| Error::Clipboard(e.to_string()))?
+    }
+
+    /// Implementação síncrona de `read`, executada dentro de
+    /// `spawn_blocking`.
+    fn read_blocking(
+        backend: BackendKind,
+        preferred_mimes: &[String],
+    ) -> Result<Option<ClipboardSnapshot>> {
+        match backend {
             BackendKind::Wayland => {
                 for mime in preferred_mimes {
                     let out = Command::new("wl-paste")
                         .arg("--no-newline")
                         .arg("--type")
-                        .arg(mime)
+                        .arg(mime.as_str())
                         .output();
                     match out {
                         Ok(o) if o.status.success() && !o.stdout.is_empty() => {
@@ -292,7 +313,7 @@ impl ClipboardManager {
                         Ok(o) if o.status.success() => continue,
                         Ok(_) => continue,
                         Err(e) => {
-                            debug!(mime, error = %e, "wl-paste falhou");
+                            debug!(mime = mime.as_str(), error = %e, "wl-paste falhou");
                             return Err(Error::Clipboard(e.to_string()));
                         }
                     }
@@ -360,25 +381,51 @@ impl ClipboardManager {
     }
 
     /// Escreve texto no clipboard.
-    pub fn write_text(&mut self, text: &str, origin: WriteOrigin) -> Result<()> {
-        self.write(MIME_TEXT, text.as_bytes(), origin)
+    pub async fn write_text(&mut self, text: &str, origin: WriteOrigin) -> Result<()> {
+        self.write(MIME_TEXT, text.as_bytes(), origin).await
     }
 
     /// Escreve imagem no clipboard.
-    pub fn write_image(&mut self, mime: &str, bytes: &[u8], origin: WriteOrigin) -> Result<()> {
+    pub async fn write_image(
+        &mut self,
+        mime: &str,
+        bytes: &[u8],
+        origin: WriteOrigin,
+    ) -> Result<()> {
         if !mime.starts_with("image/") {
             return Err(Error::Protocol(format!("mime de imagem inválido: {mime}")));
         }
-        self.write(mime, bytes, origin)
+        self.write(mime, bytes, origin).await
     }
 
     /// Escreve rich text (HTML) no clipboard.
-    pub fn write_html(&mut self, html: &str, origin: WriteOrigin) -> Result<()> {
-        self.write(MIME_HTML, html.as_bytes(), origin)
+    pub async fn write_html(&mut self, html: &str, origin: WriteOrigin) -> Result<()> {
+        self.write(MIME_HTML, html.as_bytes(), origin).await
     }
 
-    fn write(&mut self, mime: &str, bytes: &[u8], origin: WriteOrigin) -> Result<()> {
-        match self.backend {
+    /// Escreve conteúdo no clipboard.
+    ///
+    /// Usa `spawn_blocking` para não bloquear o runtime async.
+    pub async fn write(&mut self, mime: &str, bytes: &[u8], origin: WriteOrigin) -> Result<()> {
+        let backend = self.backend;
+        let mime_owned = mime.to_owned();
+        let bytes_owned = bytes.to_vec();
+        tokio::task::spawn_blocking(move || {
+            Self::write_blocking(backend, &mime_owned, &bytes_owned)
+        })
+        .await
+        .map_err(|e| Error::Clipboard(e.to_string()))??;
+        if origin == WriteOrigin::Remote {
+            let sha = hex::encode(Sha256::digest(bytes));
+            self.last_self_write.set(sha);
+        }
+        Ok(())
+    }
+
+    /// Implementação síncrona de `write`, executada dentro de
+    /// `spawn_blocking`.
+    fn write_blocking(backend: BackendKind, mime: &str, bytes: &[u8]) -> Result<()> {
+        match backend {
             BackendKind::Wayland => {
                 let mut cmd = Command::new("wl-copy");
                 cmd.arg("--type").arg(mime);
@@ -393,10 +440,6 @@ impl ClipboardManager {
                 debug!("headless: ignorando write de {} bytes", bytes.len());
             }
         }
-        if origin == WriteOrigin::Remote {
-            let sha = hex::encode(Sha256::digest(bytes));
-            self.last_self_write.set(sha);
-        }
         Ok(())
     }
 
@@ -410,7 +453,7 @@ impl ClipboardManager {
 
         tokio::spawn(async move {
             let mut me = self;
-            if backend == BackendKind::Wayland && watch::wl_paste_exists() {
+            if backend == BackendKind::Wayland && watch::wl_paste_exists().await {
                 match watch::run_event_driven(&mut me, tx.clone()).await {
                     Ok(()) => return,
                     Err(e) => {
@@ -514,25 +557,30 @@ mod tests {
         assert_eq!(s.text(), Some("<b>x</b>"));
     }
 
-    #[test]
-    fn headless_works_without_display() {
+    #[tokio::test]
+    async fn headless_works_without_display() {
         let mut m = ClipboardManager::headless();
         assert_eq!(m.backend_kind(), BackendKind::Headless);
-        assert!(m.read(&[MIME_TEXT]).unwrap().is_none());
-        m.write_text("hello", WriteOrigin::Local).unwrap();
-        m.write_html("<b>hello</b>", WriteOrigin::Local).unwrap();
+        assert!(m.read(&[MIME_TEXT]).await.unwrap().is_none());
+        m.write_text("hello", WriteOrigin::Local).await.unwrap();
+        m.write_html("<b>hello</b>", WriteOrigin::Local)
+            .await
+            .unwrap();
     }
 
-    #[test]
-    fn shared_self_write_tracker_marks_across_managers() {
+    #[tokio::test]
+    async fn shared_self_write_tracker_marks_across_managers() {
         let watcher = ClipboardManager::headless();
         let mut writer = watcher.share_self_write();
         let sha = hex::encode(Sha256::digest(b"eco"));
 
-        writer.write_text("eco", WriteOrigin::Remote).unwrap();
+        writer.write_text("eco", WriteOrigin::Remote).await.unwrap();
         assert!(watcher.last_self_write.matches(&sha));
 
-        writer.write_text("outro", WriteOrigin::Local).unwrap();
+        writer
+            .write_text("outro", WriteOrigin::Local)
+            .await
+            .unwrap();
         assert!(watcher.last_self_write.matches(&sha));
         watcher.last_self_write.clear();
         assert!(!watcher.last_self_write.matches(&sha));

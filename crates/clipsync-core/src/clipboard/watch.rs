@@ -32,8 +32,8 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// Verifica se o binário `wl-paste` está disponível no PATH.
 /// Delega para [`super::detect_clipboard_tools`] — fonte única de verdade.
-pub(super) fn wl_paste_exists() -> bool {
-    super::detect_clipboard_tools().wl_paste
+pub(super) async fn wl_paste_exists() -> bool {
+    super::detect_clipboard_tools().await.wl_paste
 }
 
 /// Lê o clipboard e devolve `Some(snapshot)` apenas quando o
@@ -41,8 +41,10 @@ pub(super) fn wl_paste_exists() -> bool {
 /// eco de uma escrita nossa). Atualiza `last_seen`/`last_self_write`
 /// conforme necessário. É a lógica compartilhada entre os modos
 /// event-driven e polling.
-pub(super) fn read_for_emit(me: &mut ClipboardManager) -> Result<Option<ClipboardSnapshot>> {
-    let snapshot = me.read(&[MIME_TEXT, MIME_PNG, MIME_JPEG, MIME_HTML])?;
+pub(super) async fn read_for_emit(me: &mut ClipboardManager) -> Result<Option<ClipboardSnapshot>> {
+    let snapshot = me
+        .read(&[MIME_TEXT, MIME_PNG, MIME_JPEG, MIME_HTML])
+        .await?;
     let Some(snap) = snapshot else {
         me.last_seen = None;
         me.last_self_write.clear();
@@ -201,7 +203,7 @@ pub(super) async fn run_event_driven(
                         ));
                     }
                     Ok(_) => {
-                        match read_for_emit(me) {
+                        match read_for_emit(me).await {
                             Ok(Some(snap)) => {
                                 emitter.feed(snap, debounce_timer.as_mut());
                             }
@@ -259,7 +261,7 @@ pub(super) async fn run_polling(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                match read_for_emit(me) {
+                match read_for_emit(me).await {
                     Ok(s) => {
                         if let Some(snap) = s {
                             emitter.feed(snap, debounce_timer.as_mut());
@@ -340,11 +342,11 @@ mod tests {
         assert_eq!(emitted.text(), Some("second"));
     }
 
-    #[test]
-    fn read_for_emit_dedups_in_headless() {
+    #[tokio::test]
+    async fn read_for_emit_dedups_in_headless() {
         let mut m = ClipboardManager::headless();
         // Headless sempre lê None: nenhum evento a emitir.
-        assert!(read_for_emit(&mut m).unwrap().is_none());
-        assert!(read_for_emit(&mut m).unwrap().is_none());
+        assert!(read_for_emit(&mut m).await.unwrap().is_none());
+        assert!(read_for_emit(&mut m).await.unwrap().is_none());
     }
 }
