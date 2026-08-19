@@ -19,17 +19,13 @@ use crate::protocol::DeviceId;
 use crate::state::SharedState;
 
 /// Endereço de bind padrão do servidor.
-const DEFAULT_BIND: &str = "0.0.0.0:8765";
+pub(crate) const DEFAULT_BIND: &str = "0.0.0.0:8765";
 /// Nome amigável padrão do servidor.
-const DEFAULT_NAME: &str = "linux-desktop";
+pub(crate) const DEFAULT_NAME: &str = "linux-desktop";
 
-/// Configuração unificada do servidor, construída uma única vez a
+/// Configuração runtime do servidor, construída uma única vez a
 /// partir do [`Config`] no boot e compartilhada por referência em
 /// todo o runtime (state, transport, message loop).
-///
-/// Substitui a antiga triplicação entre `config::ServerConfig` (TOML),
-/// `server::ServerConfig` (runtime) e flags derivadas inline no
-/// transport. Agora existe **uma** fonte de verdade para o runtime.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub bind: String,
@@ -43,10 +39,10 @@ pub struct ServerConfig {
 impl ServerConfig {
     pub fn from_config(cfg: &Config) -> Self {
         Self {
-            bind: cfg.server.bind.clone(),
-            name: cfg.server.name.clone(),
+            bind: cfg.bind.clone(),
+            name: cfg.name.clone(),
             clipboard: cfg.clipboard.clone(),
-            device_id: cfg.server.device_id.clone(),
+            device_id: cfg.device_id.clone(),
         }
     }
 
