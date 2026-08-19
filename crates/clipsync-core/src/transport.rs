@@ -5,6 +5,7 @@
 //! uma task de escrita (fila) e uma task de leitura.
 
 use std::net::SocketAddr;
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
@@ -280,17 +281,17 @@ impl ConnectionInner {
         }
     }
 
-    /// Loop de mensagens pós-pareamento: repassa mensagens de
-    /// clipboard dos peers, escreve no clipboard local e responde pings.
+    /// Loop de mensagens pós-pareamento: orquestra keepalive,
+    /// idle timer e dispatch de frames. A lógica de cada tipo de
+    /// frame vive nos sub-handlers [`Self::handle_frame`] e
+    /// [`Self::handle_text_message`].
     async fn message_loop<R>(&mut self, rx: &mut R, session: &mut PeerSession) -> Result<()>
     where
         R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
     {
-        // Keepalive task: envia ping a cada intervalo.
         let mut ping_timer = interval(crate::state::peer_ping_interval());
         let idle_timer = tokio::time::sleep(crate::state::peer_idle_timeout());
         tokio::pin!(idle_timer);
-
         let shutdown = crate::state::shutdown_token(&self.state);
 
         loop {
@@ -307,104 +308,110 @@ impl ConnectionInner {
                     return Ok(());
                 }
                 item = rx.next() => {
-                    match item {
-                        Some(Ok(ws_msg)) => match ws_msg {
-                            WsMessage::Text(text) => {
-                                let msg: Message = match serde_json::from_str(&text) {
-                                    Ok(m) => m,
-                                    Err(e) => {
-                                        debug!(peer = %self.addr, error = %e, "JSON inválido ignorado");
-                                        continue;
-                                    }
-                                };
-                                match msg {
-                                    Message::Ping { ts } => {
-                                        session.send(Message::Pong { ts });
-                                    }
-                                    Message::Pong { .. } => {
-                                        idle_timer.as_mut().reset(
-                                            tokio::time::Instant::now()
-                                                + crate::state::peer_idle_timeout(),
-                                        );
-                                    }
-                                    Message::ClipboardText { .. }
-                                    | Message::ClipboardImage { .. }
-                                    | Message::ClipboardHtml { .. } => {
-                                        // Validação de tamanho ANTES de caps.
-                                        if let Err(e) = self.check_payload_size(&msg) {
-                                            session.send(Message::Error {
-                                                code: "payload_too_large".into(),
-                                                message: e.to_string(),
-                                            });
-                                            continue;
-                                        }
-                                        match self.enforce_caps(&msg) {
-                                            Ok(()) => {}
-                                            Err(_) => {
-                                                // Capability desabilitada: avisa e ignora.
-                                                session.send(Message::Error {
-                                                    code: "capability_disabled".into(),
-                                                    message: format!(
-                                                        "tipo '{}' não habilitado na config",
-                                                        msg.type_name()
-                                                    ),
-                                                });
-                                                continue;
-                                            }
-                                        }
-                                        let origin = session.peer_id().clone();
-                                        // Origin é autoritativo: sobrepõe o campo
-                                        // declarado pelo client com o device_id
-                                        // autenticado da sessão (anti-spoof + anti-eco).
-                                        let msg = msg.with_origin(&origin);
-                                        // 1) Repassa para outros peers.
-                                        self.state.broadcast_except(msg.clone(), Some(&origin)).await;
-                                        // 2) Publica no canal local p/ o daemon gravar no clipboard.
-                                        if let Some(event) = crate::dispatch::message_to_event(&msg) {
-                                            let _ = self
-                                                .state
-                                                .local_events
-                                                .send(event)
-                                                .await;
-                                        }
-                                    }
-                                    other => {
-                                        debug!(peer = %self.addr, msg = other.type_name(), "tipo não tratado");
-                                    }
-                                }
-                            }
-                            WsMessage::Binary(data) => {
-                                if data.len() > MAX_BINARY_FRAME {
-                                    warn!(peer = %self.addr, size = data.len(), "frame binário grande demais");
-                                    return Err(Error::PayloadTooLarge {
-                                        size: data.len(),
-                                        max: MAX_BINARY_FRAME,
-                                    });
-                                }
-                                // v0.3: transferência de arquivos.
-                                debug!(peer = %self.addr, size = data.len(), "frame binário recebido (v0.3)");
-                            }
-                            WsMessage::Ping(data) => {
-                                let _ = data;
-                            }
-                            WsMessage::Pong(_) => {}
-                            WsMessage::Close(_) => {
-                                debug!(peer = %self.addr, "peer fechou a conexão");
-                                return Ok(());
-                            }
-                        },
-                        Some(Err(e)) => {
-                            error!(peer = %self.addr, error = %e, "erro de websocket");
-                            return Err(Error::WebSocket(e.to_string()));
-                        }
-                        None => {
-                            debug!(peer = %self.addr, "conexão fechada pelo peer");
-                            return Ok(());
-                        }
+                    if self.handle_frame(session, item, &mut idle_timer).await?.is_break() {
+                        return Ok(());
                     }
                 }
             }
         }
+    }
+
+    /// Dispatch de um único frame WebSocket. Retorna `Break(())`
+    /// quando a conexão deve ser encerrada.
+    async fn handle_frame(
+        &mut self,
+        session: &mut PeerSession,
+        item: Option<Result<WsMessage, axum::Error>>,
+        idle_timer: &mut std::pin::Pin<&mut tokio::time::Sleep>,
+    ) -> Result<ControlFlow<(), ()>> {
+        let ws_msg = match item {
+            Some(Ok(m)) => m,
+            Some(Err(e)) => {
+                error!(peer = %self.addr, error = %e, "erro de websocket");
+                return Err(Error::WebSocket(e.to_string()));
+            }
+            None => {
+                debug!(peer = %self.addr, "conexão fechada pelo peer");
+                return Ok(ControlFlow::Break(()));
+            }
+        };
+        match ws_msg {
+            WsMessage::Text(text) => {
+                let msg: Message = match serde_json::from_str(&text) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        debug!(peer = %self.addr, error = %e, "JSON inválido ignorado");
+                        return Ok(ControlFlow::Continue(()));
+                    }
+                };
+                match msg {
+                    Message::Ping { ts } => {
+                        session.send(Message::Pong { ts });
+                        Ok(ControlFlow::Continue(()))
+                    }
+                    Message::Pong { .. } => {
+                        idle_timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + crate::state::peer_idle_timeout());
+                        Ok(ControlFlow::Continue(()))
+                    }
+                    msg => self.handle_text_message(session, msg).await,
+                }
+            }
+            WsMessage::Binary(data) => {
+                if data.len() > MAX_BINARY_FRAME {
+                    warn!(peer = %self.addr, size = data.len(), "frame binário grande demais");
+                    return Err(Error::PayloadTooLarge {
+                        size: data.len(),
+                        max: MAX_BINARY_FRAME,
+                    });
+                }
+                debug!(peer = %self.addr, size = data.len(), "frame binário recebido (v0.3)");
+                Ok(ControlFlow::Continue(()))
+            }
+            WsMessage::Ping(_) | WsMessage::Pong(_) => Ok(ControlFlow::Continue(())),
+            WsMessage::Close(_) => {
+                debug!(peer = %self.addr, "peer fechou a conexão");
+                Ok(ControlFlow::Break(()))
+            }
+        }
+    }
+
+    /// Processa uma mensagem de texto já parseada (clipboard,
+    /// capacidades, broadcast). Retorna `Continue` para manter o
+    /// loop ou `Break` para encerrar.
+    async fn handle_text_message(
+        &mut self,
+        session: &mut PeerSession,
+        msg: Message,
+    ) -> Result<ControlFlow<(), ()>> {
+        if let Err(e) = self.check_payload_size(&msg) {
+            session.send(Message::Error {
+                code: "payload_too_large".into(),
+                message: e.to_string(),
+            });
+            return Ok(ControlFlow::Continue(()));
+        }
+        if self.enforce_caps(&msg).is_err() {
+            session.send(Message::Error {
+                code: "capability_disabled".into(),
+                message: format!("tipo '{}' não habilitado na config", msg.type_name()),
+            });
+            return Ok(ControlFlow::Continue(()));
+        }
+        let origin = session.peer_id().clone();
+        // Origin é autoritativo: sobrepõe o campo declarado pelo
+        // client com o device_id autenticado (anti-spoof + anti-eco).
+        let msg = msg.with_origin(&origin);
+        // 1) Repassa para outros peers.
+        self.state
+            .broadcast_except(msg.clone(), Some(&origin))
+            .await;
+        // 2) Publica no canal local p/ o daemon gravar no clipboard.
+        if let Some(event) = crate::dispatch::message_to_event(&msg) {
+            let _ = self.state.local_events.send(event).await;
+        }
+        Ok(ControlFlow::Continue(()))
     }
 
     /// Verifica se o tipo de mensagem está habilitado na config.
