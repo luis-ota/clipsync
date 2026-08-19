@@ -271,47 +271,17 @@ impl Message {
         serde_json::to_string(self)
     }
 
-    /// Retorna uma cópia com `origin` sobreposto nas mensagens de
-    /// clipboard. Usado pelo servidor para tornar o origin
+    /// Sobrepõe `origin` nas mensagens de clipboard **sem clonar**
+    /// o payload. Usado pelo servidor para tornar o origin
     /// autoritativo, ignorando o valor declarado pelo client.
-    pub fn with_origin(&self, origin: DeviceId) -> Message {
-        match self {
-            Self::ClipboardText {
-                mime,
-                content,
-                sha256,
-                ..
-            } => Self::ClipboardText {
-                mime: mime.clone(),
-                content: content.clone(),
-                origin,
-                sha256: sha256.clone(),
-            },
-            Self::ClipboardImage {
-                mime,
-                data_b64,
-                width,
-                height,
-                sha256,
-                ..
-            } => Self::ClipboardImage {
-                mime: mime.clone(),
-                data_b64: data_b64.clone(),
-                width: *width,
-                height: *height,
-                sha256: sha256.clone(),
-                origin,
-            },
-            Self::ClipboardHtml {
-                html, alt, sha256, ..
-            } => Self::ClipboardHtml {
-                html: html.clone(),
-                alt: alt.clone(),
-                sha256: sha256.clone(),
-                origin,
-            },
-            other => other.clone(),
+    pub fn with_origin(mut self, origin: &DeviceId) -> Message {
+        match &mut self {
+            Self::ClipboardText { origin: o, .. }
+            | Self::ClipboardImage { origin: o, .. }
+            | Self::ClipboardHtml { origin: o, .. } => *o = origin.clone(),
+            _ => {}
         }
+        self
     }
 }
 
@@ -400,7 +370,7 @@ mod tests {
             origin: forged,
             sha256: "abc".into(),
         };
-        match msg.with_origin(auth.clone()) {
+        match msg.with_origin(&auth) {
             Message::ClipboardText { origin, .. } => {
                 assert_eq!(origin, auth);
             }
