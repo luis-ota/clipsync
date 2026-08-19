@@ -8,7 +8,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
-use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -361,7 +360,7 @@ impl ConnectionInner {
                                         // 1) Repassa para outros peers.
                                         self.state.broadcast_except(msg.clone(), Some(&origin)).await;
                                         // 2) Publica no canal local p/ o daemon gravar no clipboard.
-                                        if let Some(event) = peer_snapshot(&msg) {
+                                        if let Some(event) = crate::dispatch::message_to_event(&msg) {
                                             let _ = self
                                                 .state
                                                 .local_events
@@ -456,94 +455,10 @@ impl ConnectionInner {
     }
 }
 
-/// Converte uma mensagem de clipboard de um peer em um snapshot
-/// para o canal local. Retorna `None` para mensagens não-clipboard
-/// ou quando o decode de base64 falha.
-fn peer_snapshot(msg: &Message) -> Option<crate::clipboard::ClipboardEvent> {
-    match msg {
-        Message::ClipboardText { content, .. } => Some(crate::clipboard::ClipboardEvent::Changed(
-            Box::new(crate::clipboard::ClipboardSnapshot::new_text(
-                crate::clipboard::MIME_TEXT,
-                content.as_bytes().to_vec(),
-                sha_of(msg),
-            )),
-        )),
-        Message::ClipboardImage { data_b64, mime, .. } => {
-            let bytes = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(error = %e, "base64 inválido em clipboard_image; ignorando");
-                    return None;
-                }
-            };
-            Some(crate::clipboard::ClipboardEvent::Changed(Box::new(
-                crate::clipboard::ClipboardSnapshot::new_image(mime, bytes, sha_of(msg)),
-            )))
-        }
-        Message::ClipboardHtml { html, alt, .. } => {
-            Some(crate::clipboard::ClipboardEvent::Changed(Box::new(
-                crate::clipboard::ClipboardSnapshot::new_html(
-                    html.clone(),
-                    alt.clone(),
-                    sha_of(msg),
-                ),
-            )))
-        }
-        _ => None,
-    }
-}
-
-fn sha_of(msg: &Message) -> String {
-    match msg {
-        Message::ClipboardText { sha256, .. }
-        | Message::ClipboardImage { sha256, .. }
-        | Message::ClipboardHtml { sha256, .. } => sha256.clone(),
-        _ => String::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::PairFailReason;
-
-    #[test]
-    fn peer_snapshot_builds_snapshot() {
-        let msg = Message::ClipboardText {
-            mime: "text/plain".into(),
-            content: "hello".into(),
-            origin: DeviceId::new(),
-            sha256: "abc".into(),
-        };
-        match peer_snapshot(&msg) {
-            Some(crate::clipboard::ClipboardEvent::Changed(snap)) => {
-                assert_eq!(snap.text(), Some("hello"));
-            }
-            _ => panic!("esperava Some(Changed)"),
-        }
-    }
-
-    #[test]
-    fn peer_snapshot_returns_none_for_non_clipboard() {
-        let msg = Message::Ping { ts: 123 };
-        assert!(peer_snapshot(&msg).is_none(), "ping não gera snapshot");
-    }
-
-    #[test]
-    fn peer_snapshot_returns_none_for_invalid_base64() {
-        let msg = Message::ClipboardImage {
-            mime: "image/png".into(),
-            data_b64: "!!!invalid-base64!!!".into(),
-            width: None,
-            height: None,
-            sha256: "abc".into(),
-            origin: DeviceId::new(),
-        };
-        assert!(
-            peer_snapshot(&msg).is_none(),
-            "base64 inválido deve retornar None"
-        );
-    }
 
     #[test]
     fn check_payload_size_rejects_oversized_text() {

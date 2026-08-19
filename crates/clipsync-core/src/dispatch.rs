@@ -1,19 +1,27 @@
 //! Dispatch: conversão entre snapshots de clipboard e mensagens do
 //! protocolo.
 //!
-//! As duas funções públicas deste módulo extraem a lógica de dispatch
-//! que antes vivia inline no `cmd_run` do daemon:
+//! As três funções públicas deste módulo extraem a lógica de dispatch
+//! que antes vivia inline no `cmd_run` do daemon e no `transport`:
 //!
 //! - [`event_to_message`]: snapshot local → `Message` para broadcast
 //!   aos peers (watcher → rede).
+//! - [`message_to_event`]: `Message` de clipboard recebida de um peer
+//!   → [`ClipboardEvent`] para o canal local (rede → clipboard).
 //! - [`apply_peer_snapshot`]: snapshot recebido de um peer → escrita
 //!   no clipboard local (rede → clipboard).
 //!
-//! `event_to_message` é pura e testável sem I/O. `apply_peer_snapshot`
-//! escreve no clipboard local (via `ClipboardManager`) mas é testável
-//! em modo headless sem dependência de rede.
+//! `event_to_message` e `message_to_event` são puras e testáveis sem
+//! I/O. `apply_peer_snapshot` escreve no clipboard local (via
+//! `ClipboardManager`) mas é testável em modo headless sem
+//! dependência de rede.
 
-use crate::clipboard::{ClipboardManager, ClipboardSnapshot, WriteOrigin, MIME_HTML};
+use base64::Engine;
+use tracing::warn;
+
+use crate::clipboard::{
+    ClipboardEvent, ClipboardManager, ClipboardSnapshot, WriteOrigin, MIME_HTML,
+};
 use crate::config::ClipboardConfig;
 use crate::protocol::{DeviceId, Message};
 
@@ -81,6 +89,48 @@ pub fn apply_peer_snapshot(snap: &ClipboardSnapshot, cm: &mut ClipboardManager) 
         let _ = cm.write_text(snap.text().unwrap_or_default(), WriteOrigin::Remote);
     } else if snap.mime.starts_with("image/") {
         let _ = cm.write_image(&snap.mime, &snap.bytes, WriteOrigin::Remote);
+    }
+}
+
+/// Converte uma [`Message`] de clipboard recebida de um peer em um
+/// [`ClipboardEvent`] para o canal local.
+///
+/// Retorna `None` para mensagens não-clipboard ou quando o decode de
+/// base64 falha. É a operação inversa de [`event_to_message`].
+pub fn message_to_event(msg: &Message) -> Option<ClipboardEvent> {
+    match msg {
+        Message::ClipboardText { content, .. } => Some(ClipboardEvent::Changed(Box::new(
+            ClipboardSnapshot::new_text(
+                crate::clipboard::MIME_TEXT,
+                content.as_bytes().to_vec(),
+                sha_of(msg),
+            ),
+        ))),
+        Message::ClipboardImage { data_b64, mime, .. } => {
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(error = %e, "base64 inválido em clipboard_image; ignorando");
+                    return None;
+                }
+            };
+            Some(ClipboardEvent::Changed(Box::new(
+                ClipboardSnapshot::new_image(mime, bytes, sha_of(msg)),
+            )))
+        }
+        Message::ClipboardHtml { html, alt, .. } => Some(ClipboardEvent::Changed(Box::new(
+            ClipboardSnapshot::new_html(html.clone(), alt.clone(), sha_of(msg)),
+        ))),
+        _ => None,
+    }
+}
+
+fn sha_of(msg: &Message) -> String {
+    match msg {
+        Message::ClipboardText { sha256, .. }
+        | Message::ClipboardImage { sha256, .. }
+        | Message::ClipboardHtml { sha256, .. } => sha256.clone(),
+        _ => String::new(),
     }
 }
 
@@ -291,5 +341,45 @@ mod tests {
         };
         let mut cm = ClipboardManager::headless();
         apply_peer_snapshot(&snap, &mut cm);
+    }
+
+    // ---- message_to_event tests ----
+
+    #[test]
+    fn message_to_event_builds_snapshot() {
+        let msg = Message::ClipboardText {
+            mime: "text/plain".into(),
+            content: "hello".into(),
+            origin: DeviceId::new(),
+            sha256: "abc".into(),
+        };
+        match message_to_event(&msg) {
+            Some(ClipboardEvent::Changed(snap)) => {
+                assert_eq!(snap.text(), Some("hello"));
+            }
+            _ => panic!("esperava Some(Changed)"),
+        }
+    }
+
+    #[test]
+    fn message_to_event_returns_none_for_non_clipboard() {
+        let msg = Message::Ping { ts: 123 };
+        assert!(message_to_event(&msg).is_none(), "ping não gera snapshot");
+    }
+
+    #[test]
+    fn message_to_event_returns_none_for_invalid_base64() {
+        let msg = Message::ClipboardImage {
+            mime: "image/png".into(),
+            data_b64: "!!!invalid-base64!!!".into(),
+            width: None,
+            height: None,
+            sha256: "abc".into(),
+            origin: DeviceId::new(),
+        };
+        assert!(
+            message_to_event(&msg).is_none(),
+            "base64 inválido deve retornar None"
+        );
     }
 }
