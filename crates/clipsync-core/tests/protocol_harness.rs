@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clipsync_core::clipboard::{ClipboardEvent, MIME_TEXT};
+use clipsync_core::clipboard::{sha256_hex, ClipboardEvent, MIME_TEXT};
 use clipsync_core::protocol::{
     Capabilities, DeviceId, DeviceInfo, DeviceKind, Message, PairFailReason,
 };
@@ -27,7 +27,6 @@ use clipsync_core::server::{Server, ServerConfig};
 use clipsync_core::state::ServerState;
 use clipsync_core::PROTOCOL_VERSION;
 use futures::{SinkExt, StreamExt};
-use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -40,10 +39,6 @@ const OP_TIMEOUT: Duration = Duration::from_secs(5);
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-fn sha256_hex(s: &str) -> String {
-    hex::encode(Sha256::digest(s.as_bytes()))
-}
 
 /// Sobe um server em porta efêmera e devolve (addr, handle) para o
 /// caller abortar no fim do teste.
@@ -163,7 +158,7 @@ async fn full_handshake_and_clipboard_roundtrip() {
         // 5) Round-trip local -> client: simula o watcher do daemon
         //    (broadcast_except com origin None); o client deve receber.
         let local_content = "texto copiado no PC (evento local)";
-        let local_sha = sha256_hex(local_content);
+        let local_sha = sha256_hex(local_content.as_bytes());
         state
             .broadcast_except(
                 Message::ClipboardText {
@@ -194,7 +189,7 @@ async fn full_handshake_and_clipboard_roundtrip() {
         // 6) Round-trip client -> local: o client envia clipboard_text e o
         //    server publica no canal local_events (o daemon gravaria).
         let client_content = "texto copiado no phone (enviado pelo client)";
-        let client_sha = sha256_hex(client_content);
+        let client_sha = sha256_hex(client_content.as_bytes());
         send_json(
             &mut ws,
             Message::ClipboardText {
@@ -426,7 +421,7 @@ async fn run_origin_forgery(addr: &SocketAddr, state: &std::sync::Arc<ServerStat
             mime: MIME_TEXT.to_owned(),
             content: forged_content.to_owned(),
             origin: forged.clone(),
-            sha256: sha256_hex(forged_content),
+            sha256: sha256_hex(forged_content.as_bytes()),
         },
     )
     .await;
@@ -686,7 +681,7 @@ async fn two_clients_anti_echo() {
 
         // Client A envia clipboard_text.
         let content = "texto anti-eco de A";
-        let sha = sha256_hex(content);
+        let sha = sha256_hex(content.as_bytes());
         send_json(
             &mut ws_a,
             Message::ClipboardText {
@@ -796,7 +791,7 @@ async fn malformed_frames_handled_gracefully() {
         // Envia um clipboard_text válido; se o servidor não crashou,
         // ele publica no canal local_events.
         let content = "still working after bad json";
-        let sha = sha256_hex(content);
+        let sha = sha256_hex(content.as_bytes());
         send_json(
             &mut ws,
             Message::ClipboardText {

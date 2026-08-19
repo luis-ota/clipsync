@@ -23,6 +23,11 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 
+/// Calcula o SHA-256 de `data` e retorna a representação hexadecimal.
+pub fn sha256_hex(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
+}
+
 /// MIME types suportados por este daemon.
 pub const MIME_TEXT: &str = "text/plain;charset=utf-8";
 pub const MIME_TEXT_PLAIN: &str = "text/plain";
@@ -343,7 +348,7 @@ impl ClipboardManager {
         match out {
             Ok(o) if o.status.success() && !o.stdout.is_empty() => {
                 let html = String::from_utf8_lossy(&o.stdout).into_owned();
-                let sha256 = hex::encode(Sha256::digest(html.as_bytes()));
+                let sha256 = sha256_hex(html.as_bytes());
                 snap.rich = Some(RichText { html, sha256 });
             }
             _ => debug!("sem conteúdo text/html no clipboard"),
@@ -351,7 +356,7 @@ impl ClipboardManager {
     }
 
     fn snapshot(mime: &str, bytes: Vec<u8>) -> ClipboardSnapshot {
-        let sha256 = hex::encode(Sha256::digest(&bytes));
+        let sha256 = sha256_hex(&bytes);
         if mime.starts_with("image/") {
             ClipboardSnapshot::new_image(mime, bytes, sha256)
         } else {
@@ -394,7 +399,7 @@ impl ClipboardManager {
             }
         }
         if origin == WriteOrigin::Remote {
-            let sha = hex::encode(Sha256::digest(bytes));
+            let sha = sha256_hex(bytes);
             self.last_self_write.set(sha);
         }
         Ok(())
@@ -495,7 +500,7 @@ mod tests {
         let s = ClipboardSnapshot::new_html(
             "<b>hello</b>".into(),
             Some("hello".into()),
-            hex::encode(Sha256::digest(b"<b>hello</b>")),
+            sha256_hex(b"<b>hello</b>"),
         );
         let plain = ClipboardManager::snapshot("text/plain", b"hello".to_vec());
         assert_ne!(s.sha256, plain.sha256);
@@ -527,7 +532,7 @@ mod tests {
     fn shared_self_write_tracker_marks_across_managers() {
         let watcher = ClipboardManager::headless();
         let mut writer = watcher.share_self_write();
-        let sha = hex::encode(Sha256::digest(b"eco"));
+        let sha = sha256_hex(b"eco");
 
         writer.write_text("eco", WriteOrigin::Remote).unwrap();
         assert!(watcher.last_self_write.matches(&sha));
