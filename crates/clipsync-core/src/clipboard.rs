@@ -447,12 +447,16 @@ impl ClipboardManager {
     ///
     /// Wayland usa `wl-paste --watch`; X11/headless faz polling.
     /// Mudanças rápidas são coalescidas via debounce.
-    pub fn watch(self, interval: Duration) -> mpsc::Receiver<ClipboardEvent> {
+    ///
+    /// Não consome `self` — usa [`share_self_write`] internamente para
+    /// obter um clone com rastro compartilhado que é movido para a
+    /// task spawned.
+    pub fn watch(&self, interval: Duration) -> mpsc::Receiver<ClipboardEvent> {
         let (tx, rx) = mpsc::channel(64);
         let backend = self.backend;
+        let mut me = self.share_self_write();
 
         tokio::spawn(async move {
-            let mut me = self;
             if backend == BackendKind::Wayland && watch::wl_paste_exists().await {
                 match watch::run_event_driven(&mut me, tx.clone()).await {
                     Ok(()) => return,
