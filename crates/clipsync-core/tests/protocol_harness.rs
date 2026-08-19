@@ -161,12 +161,12 @@ async fn full_handshake_and_clipboard_roundtrip() {
         let local_sha = sha256_hex(local_content.as_bytes());
         state
             .broadcast_except(
-                Message::ClipboardText {
+                Arc::new(Message::ClipboardText {
                     mime: MIME_TEXT.to_owned(),
                     content: local_content.to_owned(),
                     origin: DeviceId::new(),
                     sha256: local_sha.clone(),
-                },
+                }),
                 None,
             )
             .await;

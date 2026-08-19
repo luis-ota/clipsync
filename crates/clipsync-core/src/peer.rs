@@ -6,6 +6,7 @@
 //! `PeerHandle` — não há duplicação.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -25,13 +26,13 @@ pub struct PeerSession {
     state: SharedState,
     addr: SocketAddr,
     session_id: String,
-    tx: mpsc::Sender<Message>,
+    tx: mpsc::Sender<Arc<Message>>,
     /// `None` antes de `attach()`; `Some` após.
     handle: Option<PeerHandle>,
 }
 
 impl PeerSession {
-    pub fn new(state: SharedState, addr: SocketAddr, tx: mpsc::Sender<Message>) -> Self {
+    pub fn new(state: SharedState, addr: SocketAddr, tx: mpsc::Sender<Arc<Message>>) -> Self {
         Self {
             state,
             addr,
@@ -83,9 +84,12 @@ impl PeerSession {
             .device_id
     }
 
-    /// Envia uma mensagem ao peer pela fila.
+    /// Envia uma mensagem ao peer pela fila. Empacota em `Arc` para
+    /// compatibilidade com o canal `mpsc::Sender<Arc<Message>>` (o
+    /// broadcast_except já recebe `Arc` diretamente, mas envios
+    /// individuais usam este wrapper).
     pub fn send(&self, msg: Message) {
-        if let Err(e) = self.tx.try_send(msg) {
+        if let Err(e) = self.tx.try_send(Arc::new(msg)) {
             debug!(peer = %self.addr, error = %e, "falha enviando ao peer");
         }
     }
@@ -146,12 +150,12 @@ mod tests {
         // O sucessor continua recebendo broadcasts.
         state
             .broadcast_except(
-                Message::ClipboardText {
+                Arc::new(Message::ClipboardText {
                     mime: "text/plain".into(),
                     content: "hi".into(),
                     origin: DeviceId::new(),
                     sha256: "abc".into(),
-                },
+                }),
                 None,
             )
             .await;

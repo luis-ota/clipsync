@@ -263,8 +263,8 @@ impl Message {
 
     /// Serializa a mensagem para JSON. O campo `v` só existe em
     /// `Hello`; outras mensagens não carregam versão no wire.
-    pub fn wrap(self) -> serde_json::Value {
-        serde_json::to_value(&self).expect("Message sempre serializa")
+    pub fn wrap(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("Message sempre serializa")
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {

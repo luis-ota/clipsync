@@ -31,13 +31,14 @@ pub struct PeerHandle {
     pub session_id: String,
     pub name: String,
     /// Canal para enviar mensagens ao peer. Enviar = colocar na fila
-    /// do writer task.
-    pub tx: mpsc::Sender<Message>,
+    /// do writer task. Usa `Arc<Message>` para evitar O(N) deep-clones
+    /// em broadcast (clipboard images podem ter vários MB).
+    pub tx: mpsc::Sender<Arc<Message>>,
 }
 
 impl PeerHandle {
     /// Envia uma mensagem ao peer (fire-and-forget; fila).
-    pub fn send(&self, msg: Message) -> bool {
+    pub fn send(&self, msg: Arc<Message>) -> bool {
         match self.tx.try_send(msg) {
             Ok(()) => true,
             Err(e) => {
@@ -104,10 +105,10 @@ impl ServerState {
                     device = %device_id,
                     "device reconectado com nova sessão; notificando a antiga"
                 );
-                old.send(Message::Error {
+                old.send(Arc::new(Message::Error {
                     code: "superseded".into(),
                     message: "sessão substituída por nova conexão deste device".into(),
-                });
+                }));
             }
         }
         map.insert(device_id.clone(), handle);
@@ -134,12 +135,14 @@ impl ServerState {
     }
 
     /// Envia uma mensagem para todos os peers conectados, exceto o
-    /// originador (para evitar eco).
-    pub async fn broadcast_except(&self, msg: Message, origin: Option<&DeviceId>) {
+    /// originador (para evitar eco). Usa `Arc<Message>` para que
+    /// cada peer receba um `Arc::clone` barato em vez de um
+    /// deep-clone (relevante para clipboard images de vários MB).
+    pub async fn broadcast_except(self: &Arc<Self>, msg: Arc<Message>, except: Option<&DeviceId>) {
         let peers: Vec<PeerHandle> = {
             let map = self.peers.read().await;
             map.values()
-                .filter(|p| match origin {
+                .filter(|p| match except {
                     Some(o) => &p.device_id != o,
                     None => true,
                 })
@@ -148,7 +151,7 @@ impl ServerState {
         };
         let mut failed = 0;
         for peer in &peers {
-            if !peer.send(msg.clone()) {
+            if !peer.send(Arc::clone(&msg)) {
                 failed += 1;
             }
         }
@@ -219,7 +222,7 @@ mod tests {
         device_id: DeviceId,
         session_id: &str,
         name: &str,
-        tx: mpsc::Sender<Message>,
+        tx: mpsc::Sender<Arc<Message>>,
     ) -> PeerHandle {
         PeerHandle {
             addr: addr.parse().unwrap(),
@@ -290,12 +293,12 @@ mod tests {
             .add_peer(make_handle("2.2.2.2:2", id_b.clone(), "sess-b", "b", tx_b))
             .await;
 
-        let msg = Message::ClipboardText {
+        let msg = Arc::new(Message::ClipboardText {
             mime: "text/plain".into(),
             content: "hi".into(),
             origin: id_a.clone(),
             sha256: "abc".into(),
-        };
+        });
         state.broadcast_except(msg, Some(&id_a)).await;
 
         assert!(rx_b.try_recv().is_ok());
