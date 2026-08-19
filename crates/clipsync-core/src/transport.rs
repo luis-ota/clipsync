@@ -90,6 +90,7 @@ pub struct ConnectionInner {
 }
 
 impl ConnectionInner {
+    #[tracing::instrument(skip_all, fields(peer = %self.addr))]
     async fn reader_loop<R>(&mut self, rx: &mut R, session: &mut PeerSession) -> Result<()>
     where
         R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
@@ -190,6 +191,7 @@ impl ConnectionInner {
     }
 
     /// Executa o fluxo de pareamento: envia desafio, espera submissão.
+    #[tracing::instrument(skip_all, fields(peer = %self.addr))]
     async fn pairing_flow<R>(
         &mut self,
         rx: &mut R,
@@ -285,6 +287,7 @@ impl ConnectionInner {
     /// idle timer e dispatch de frames. A lógica de cada tipo de
     /// frame vive nos sub-handlers [`Self::handle_frame`] e
     /// [`Self::handle_text_message`].
+    #[tracing::instrument(skip_all, fields(peer = %self.addr))]
     async fn message_loop<R>(&mut self, rx: &mut R, session: &mut PeerSession) -> Result<()>
     where
         R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
