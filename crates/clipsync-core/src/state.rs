@@ -14,7 +14,7 @@ use crate::pairing::PairingManager;
 use crate::protocol::{DeviceId, Message};
 
 /// Capacidade do canal de envio por peer.
-const PEER_QUEUE: usize = 128;
+pub const PEER_QUEUE: usize = 128;
 /// Timeout para considerar um peer morto (sem pong).
 const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Intervalo de keepalive. O loop de ping é por-conexão e só existe
@@ -182,11 +182,6 @@ pub(crate) fn peer_idle_timeout() -> Duration {
 /// Intervalo de ping (re)exportado para o server.
 pub(crate) fn peer_ping_interval() -> Duration {
     PEER_PING_INTERVAL
-}
-
-/// Capacidade padrão da fila de um peer.
-pub(crate) fn peer_queue_size() -> usize {
-    PEER_QUEUE
 }
 
 /// Avisa o shutdown de que um peer saiu.

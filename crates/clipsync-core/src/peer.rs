@@ -91,11 +91,6 @@ impl PeerSession {
     }
 }
 
-/// Re-export para conveniência de callers.
-pub fn peer_queue_size() -> usize {
-    crate::state::peer_queue_size()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,6 +14,7 @@ use tracing::info;
 
 use crate::error::{Error, Result};
 use crate::protocol::DeviceId;
+use crate::server::{DEFAULT_BIND, DEFAULT_NAME};
 use crate::SERVICE_TYPE;
 
 /// Qual projeto as pastas de config usam.
@@ -38,18 +39,9 @@ pub fn trusted_devices_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("trusted.toml"))
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Config {
-    pub server: ServerConfig,
-    pub discovery: DiscoveryConfig,
-    pub clipboard: ClipboardConfig,
-    pub security: SecurityConfig,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ServerConfig {
+pub struct Config {
     /// Endereço de bind do servidor WebSocket. Para aceitar conexões
     /// de outros devices na LAN, use `0.0.0.0:8765`.
     pub bind: String,
@@ -61,14 +53,20 @@ pub struct ServerConfig {
     /// construídas diretamente sem passar por `load_or_default`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<DeviceId>,
+    pub discovery: DiscoveryConfig,
+    pub clipboard: ClipboardConfig,
+    pub security: SecurityConfig,
 }
 
-impl Default for ServerConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:8765".into(),
-            name: "linux-desktop".into(),
+            bind: DEFAULT_BIND.into(),
+            name: DEFAULT_NAME.into(),
             device_id: None,
+            discovery: DiscoveryConfig::default(),
+            clipboard: ClipboardConfig::default(),
+            security: SecurityConfig::default(),
         }
     }
 }
@@ -172,8 +170,8 @@ impl Config {
 
         // O daemon precisa de um device_id próprio estável (origin do
         // anti-eco). Gera e persiste se ausente (config antiga).
-        if cfg.server.device_id.is_none() {
-            cfg.server.device_id = Some(DeviceId::new());
+        if cfg.device_id.is_none() {
+            cfg.device_id = Some(DeviceId::new());
             cfg.save(&path)?;
             info!(path = %path.display(), "device_id do daemon gerado e persistido");
         }
@@ -203,7 +201,7 @@ mod tests {
         let cfg = Config::default();
         let s = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
-        assert_eq!(back.server.bind, cfg.server.bind);
+        assert_eq!(back.bind, cfg.bind);
         assert_eq!(
             back.clipboard.max_image_bytes,
             cfg.clipboard.max_image_bytes
@@ -217,7 +215,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let cfg = Config::load_or_default(Some(&path)).unwrap();
         assert!(path.exists());
-        assert_eq!(cfg.server.bind, "0.0.0.0:8765");
+        assert_eq!(cfg.bind, "0.0.0.0:8765");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -229,7 +227,6 @@ mod tests {
 
         let first = Config::load_or_default(Some(&path)).unwrap();
         let id = first
-            .server
             .device_id
             .clone()
             .expect("device_id gerado no primeiro load");
@@ -237,7 +234,7 @@ mod tests {
 
         // Recarregar não pode gerar um id novo: origin deve ser estável.
         let second = Config::load_or_default(Some(&path)).unwrap();
-        assert_eq!(second.server.device_id, Some(id));
+        assert_eq!(second.device_id, Some(id));
         let _ = std::fs::remove_file(&path);
     }
 }
