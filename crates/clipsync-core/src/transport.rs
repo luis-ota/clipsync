@@ -5,6 +5,7 @@
 //! uma task de escrita (fila) e uma task de leitura.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
@@ -47,7 +48,7 @@ impl Connection {
             config,
         } = self;
         let (mut tx, mut rx) = socket.split();
-        let (out_tx, mut out_rx) = mpsc::channel::<Message>(128);
+        let (out_tx, mut out_rx) = mpsc::channel::<Arc<Message>>(128);
 
         let mut session = PeerSession::new(state.clone(), addr, out_tx.clone());
 
@@ -358,8 +359,9 @@ impl ConnectionInner {
                                         // declarado pelo client com o device_id
                                         // autenticado da sessão (anti-spoof + anti-eco).
                                         let msg = msg.with_origin(origin.clone());
+                                        let msg = Arc::new(msg);
                                         // 1) Repassa para outros peers.
-                                        self.state.broadcast_except(msg.clone(), Some(&origin)).await;
+                                        self.state.broadcast_except(Arc::clone(&msg), Some(&origin)).await;
                                         // 2) Publica no canal local p/ o daemon gravar no clipboard.
                                         if let Some(event) = peer_snapshot(&msg) {
                                             let _ = self

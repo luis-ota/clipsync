@@ -95,9 +95,9 @@ pub async fn apply_peer_snapshot(snap: &ClipboardSnapshot, cm: &mut ClipboardMan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard::sha256_hex;
     use crate::clipboard::{ClipboardSnapshot, MIME_HTML, MIME_JPEG, MIME_PNG, MIME_TEXT};
     use crate::protocol::DeviceId;
-    use sha2::{Digest, Sha256};
 
     fn default_clipboard_cfg() -> ClipboardConfig {
         ClipboardConfig::default()
@@ -114,7 +114,7 @@ mod tests {
         let snap = ClipboardSnapshot::new_text(
             MIME_TEXT,
             b"hello world".to_vec(),
-            hex::encode(Sha256::digest(b"hello world")),
+            sha256_hex(b"hello world"),
         );
         let cfg = default_clipboard_cfg();
         let msg = event_to_message(&snap, &cfg, &origin()).expect("esperava Some");
@@ -137,11 +137,8 @@ mod tests {
     #[test]
     fn image_snapshot_produces_clipboard_image() {
         let img_bytes = vec![0x89, 0x50, 0x4E, 0x47]; // PNG magic
-        let snap = ClipboardSnapshot::new_image(
-            MIME_PNG,
-            img_bytes.clone(),
-            hex::encode(Sha256::digest(&img_bytes)),
-        );
+        let snap =
+            ClipboardSnapshot::new_image(MIME_PNG, img_bytes.clone(), sha256_hex(&img_bytes));
         let cfg = default_clipboard_cfg();
         let msg = event_to_message(&snap, &cfg, &origin()).expect("esperava Some");
         match msg {
@@ -169,7 +166,7 @@ mod tests {
         let snap = ClipboardSnapshot::new_html(
             html.into(),
             Some("bold".into()),
-            hex::encode(Sha256::digest(html.as_bytes())),
+            sha256_hex(html.as_bytes()),
         );
         let mut cfg = default_clipboard_cfg();
         cfg.sync_html = true;

@@ -18,6 +18,8 @@ use clipsync_core::dispatch;
 use clipsync_core::server::{Server, ServerConfig};
 use clipsync_core::state::ServerState;
 
+use std::sync::Arc;
+
 mod tray;
 
 // ---------------------------------------------------------------------------
@@ -103,7 +105,7 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
                 ClipboardEvent::Changed(snap) => {
                     if let Some(msg) = dispatch::event_to_message(&snap, &clipboard_cfg, &daemon_id)
                     {
-                        state_watcher.broadcast_except(msg, None).await;
+                        state_watcher.broadcast_except(Arc::new(msg), None).await;
                     }
                 }
                 ClipboardEvent::BackendLost(e) => {

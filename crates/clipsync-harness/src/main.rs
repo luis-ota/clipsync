@@ -16,10 +16,9 @@
 use std::time::Duration;
 
 use clap::Parser;
-use clipsync_core::clipboard::MIME_TEXT;
+use clipsync_core::clipboard::{sha256_hex, MIME_TEXT};
 use clipsync_core::protocol::{Capabilities, DeviceInfo, DeviceKind, Message, PROTOCOL_VERSION};
 use futures::{SinkExt, StreamExt};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -43,10 +42,6 @@ struct Cli {
     /// Nome do device anunciado no hello
     #[arg(long, default_value = "harness")]
     name: String,
-}
-
-fn sha256_hex(s: &str) -> String {
-    hex::encode(Sha256::digest(s.as_bytes()))
 }
 
 fn resolve_url(cli: &Cli) -> String {
@@ -179,7 +174,7 @@ async fn run(cli: Cli) {
                             mime: MIME_TEXT.to_owned(),
                             content: text.clone(),
                             origin: device_id.clone(),
-                            sha256: sha256_hex(&text),
+                            sha256: sha256_hex(text.as_bytes()),
                         };
                         match send(&mut ws, msg).await {
                             Ok(()) => println!("SENT {text}"),
