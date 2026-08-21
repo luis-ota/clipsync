@@ -69,12 +69,10 @@ impl ServerState {
     pub fn new(
         config: crate::server::ServerConfig,
         trusted_path: Option<&std::path::Path>,
-    ) -> (Self, mpsc::Receiver<crate::clipboard::ClipboardEvent>) {
+    ) -> crate::Result<(Self, mpsc::Receiver<crate::clipboard::ClipboardEvent>)> {
         let (tx, rx) = mpsc::channel(256);
         let pm = match trusted_path {
-            Some(path) => {
-                PairingManager::new_with_store(path).unwrap_or_else(|_| PairingManager::new())
-            }
+            Some(path) => PairingManager::new_with_store(path)?,
             None => PairingManager::new(),
         };
         let state = Self {
@@ -84,7 +82,7 @@ impl ServerState {
             local_events: tx,
             shutdown: CancellationToken::new(),
         };
-        (state, rx)
+        Ok((state, rx))
     }
 
     /// Registra um peer conectado. Se o `device_id` já tem uma sessão
@@ -208,7 +206,7 @@ mod tests {
         SharedState,
         mpsc::Receiver<crate::clipboard::ClipboardEvent>,
     ) {
-        let (state, rx) = ServerState::new(crate::server::ServerConfig::default(), None);
+        let (state, rx) = ServerState::new(crate::server::ServerConfig::default(), None).unwrap();
         (Arc::new(state), rx)
     }
 
@@ -311,5 +309,16 @@ mod tests {
         let caps = Capabilities::default();
         assert!(!caps.files);
         assert!(!caps.text);
+    }
+
+    #[test]
+    fn trusted_store_load_error_is_not_replaced_with_empty_manager() {
+        let path =
+            std::env::temp_dir().join(format!("clipsync-state-store-error-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(ServerState::new(crate::server::ServerConfig::default(), Some(&path)).is_err());
+        let _ = std::fs::remove_dir(&path);
     }
 }

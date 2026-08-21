@@ -16,6 +16,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
+use crate::pairing::PairingError;
 use crate::peer::PeerSession;
 use crate::protocol::{DeviceId, DeviceInfo, Message, PROTOCOL_VERSION};
 use crate::server::ServerConfig;
@@ -263,7 +264,7 @@ impl ConnectionInner {
                                     });
                                     return Ok(());
                                 }
-                                Err(reason) => {
+                                Err(PairingError::Invalid(reason)) => {
                                     session.send(Message::PairFail {
                                         reason,
                                         message: "PIN inválido ou expirado".into(),
@@ -271,6 +272,7 @@ impl ConnectionInner {
                                     self.state.pairing.lock().await.cancel_session(&session_id);
                                     return Err(Error::Pairing("PIN incorreto".into()));
                                 }
+                                Err(PairingError::Store(error)) => return Err(error),
                             }
                         }
                         other => {
@@ -493,7 +495,7 @@ mod tests {
     #[test]
     fn check_payload_size_rejects_oversized_text() {
         let config = crate::server::ServerConfig::default();
-        let (state, _rx) = crate::state::ServerState::new(config.clone(), None);
+        let (state, _rx) = crate::state::ServerState::new(config.clone(), None).unwrap();
         let state = std::sync::Arc::new(state);
         let conn = ConnectionInner {
             addr: "127.0.0.1:0".parse().unwrap(),

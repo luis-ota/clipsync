@@ -181,7 +181,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn server_healthz_ok() {
-        let (state, _rx) = ServerState::new(ServerConfig::default(), None);
+        let (state, _rx) = ServerState::new(ServerConfig::default(), None).unwrap();
         let state = std::sync::Arc::new(state);
         let server = Server::new(ServerConfig::default(), state.clone());
         let app = server.router();
