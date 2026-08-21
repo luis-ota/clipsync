@@ -1,0 +1,152 @@
+package com.clipsync.android
+
+import android.Manifest
+import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.clipsync.android.data.AppRepository
+import com.clipsync.android.data.AppUiState
+import com.clipsync.android.data.ConnectionStatus
+import com.clipsync.android.data.DiscoveredServer
+import com.clipsync.android.service.ClipboardSyncService
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        ContextCompat.startForegroundService(this, Intent(this, ClipboardSyncService::class.java))
+        setContent { ClipSyncApp() }
+    }
+}
+
+@Composable
+private fun ClipSyncApp() {
+    val state by AppRepository.state.collectAsStateWithLifecycle()
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(
+        primary = Color(0xFFB43B22), secondary = Color(0xFF1E6654),
+        background = Color(0xFFFFF8F0), surface = Color(0xFFFFFBF7),
+    )) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 28.dp)) {
+                Text("CLIPSYNC", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text("Clipboard na sua rede", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(20.dp))
+                StatusCard(state)
+                if (state.status == ConnectionStatus.WAITING_FOR_PIN) PinForm()
+                Spacer(Modifier.height(24.dp))
+                Text("Computadores encontrados", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                if (state.servers.isEmpty()) {
+                    Text("Nenhum servidor mDNS encontrado.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(state.servers, key = DiscoveredServer::id) { server ->
+                            ServerRow(server, state.selectedServerId == server.id)
+                        }
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Android 10+ permite ler o clipboard somente com o app em primeiro plano. A notificacao mantem a conexao e o recebimento remoto, mas nao contorna essa regra.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusCard(state: AppUiState) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFF1E7DC))) {
+        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(10.dp).height(10.dp).background(
+                if (state.status == ConnectionStatus.CONNECTED) Color(0xFF1E7A58) else Color(0xFFC56A27),
+                RoundedCornerShape(5.dp),
+            ))
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(state.status.name.replace('_', ' '), fontWeight = FontWeight.Bold)
+                Text(state.statusDetail, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ServerRow(server: DiscoveredServer, selected: Boolean) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable { AppRepository.select(server) },
+        colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFFDDECE6) else MaterialTheme.colorScheme.surface),
+    ) {
+        Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Column {
+                Text(server.name, fontWeight = FontWeight.SemiBold)
+                Text("${server.host}:${server.port}", style = MaterialTheme.typography.bodySmall)
+            }
+            Text(if (selected) "SELECIONADO" else "CONECTAR", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+        }
+    }
+}
+
+@Composable
+private fun PinForm() {
+    var pin by remember { mutableStateOf("") }
+    Spacer(Modifier.height(16.dp))
+    OutlinedTextField(
+        value = pin,
+        onValueChange = { pin = it.filter(Char::isDigit).take(6) },
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text("PIN de 6 digitos") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+    )
+    Spacer(Modifier.height(8.dp))
+    Button(onClick = { AppRepository.submitPin(pin) }, enabled = pin.length == 6, modifier = Modifier.fillMaxWidth()) {
+        Text("Parear")
+    }
+}
