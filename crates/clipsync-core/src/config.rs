@@ -154,24 +154,27 @@ impl Config {
             None => default_config_path()?,
         };
 
-        let mut cfg = if !path.exists() {
-            let cfg = Config::default();
-            cfg.save(&path)?;
-            info!(path = %path.display(), "config padrão criada");
-            cfg
+        let (mut cfg, mut needs_save) = if !path.exists() {
+            (Config::default(), true)
         } else {
             let contents = std::fs::read_to_string(&path)
                 .map_err(|e| Error::Config(format!("falha lendo {path:?}: {e}")))?;
-            toml::from_str(&contents)
-                .map_err(|e| Error::Config(format!("TOML inválido em {path:?}: {e}")))?
+            (
+                toml::from_str(&contents)
+                    .map_err(|e| Error::Config(format!("TOML inválido em {path:?}: {e}")))?,
+                false,
+            )
         };
 
         // O daemon precisa de um device_id próprio estável (origin do
         // anti-eco). Gera e persiste se ausente (config antiga).
         if cfg.device_id.is_none() {
             cfg.device_id = Some(DeviceId::new());
+            needs_save = true;
+        }
+        if needs_save {
             cfg.save(&path)?;
-            info!(path = %path.display(), "device_id do daemon gerado e persistido");
+            info!(path = %path.display(), "config criada ou atualizada atomicamente");
         }
         Ok(cfg)
     }
@@ -184,7 +187,7 @@ impl Config {
         }
         let toml_str = toml::to_string_pretty(self)
             .map_err(|e| Error::Config(format!("falha serializando config: {e}")))?;
-        std::fs::write(path, toml_str)
+        crate::persistence::atomic_write(path, toml_str.as_bytes())
             .map_err(|e| Error::Config(format!("falha salvando {path:?}: {e}")))?;
         Ok(())
     }

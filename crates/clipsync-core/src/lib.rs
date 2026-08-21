@@ -21,6 +21,7 @@ pub mod dispatch;
 pub mod error;
 pub mod pairing;
 pub mod peer;
+mod persistence;
 pub mod protocol;
 pub mod server;
 pub mod state;

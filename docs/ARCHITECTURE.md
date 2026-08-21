@@ -64,8 +64,15 @@ o que acabou de ser sincronizado de um peer.
 - Pareamento: PIN de 6 dígitos (`PairingManager`). O device envia
   `hello`; se desconhecido, o servidor gera um `PairChallenge` ligado ao
   `session_id` desta conexão e espera `PairSubmit`. PIN correto → `pair_ok`
-  + `device_id` persistido pelo client. O nome do device é apenas metadata.
+  + `device_id` persistido pelo client. Há no máximo um desafio global, como
+  há um único PIN no tray; um novo pedido invalida o anterior. O nome do
+  device é apenas metadata.
 - `trusted_devices_path()` → `~/.config/clipsync/trusted.toml`.
+- `config.toml` e `trusted.toml` são publicados por escrita temporária,
+  `fsync`, rename atômico e `fsync` do diretório.
+- O daemon mantém ownership exclusivo de `trusted.toml` por lock
+  interprocesso. `untrust` opera offline e recusa a mutação enquanto o daemon
+  estiver ativo, evitando divergência entre disco e memória.
 - A criptografia por mensagem (AES-GCM) é planejada para v0.2.
 
 ## Crate `clipsyncd`
@@ -75,9 +82,9 @@ Binário do daemon desktop. CLI com subcomandos:
 ```
 clipsyncd                 # roda o daemon (default)
 clipsyncd run
-clipsyncd show-pin        # mostra o PIN atual do pareamento
+clipsyncd show-pin        # orienta como consultar o PIN no daemon/tray
 clipsyncd list-peers      # lista devices confiados
-clipsyncd untrust <id>    # remove um device confiado
+clipsyncd untrust <id>    # remove um device (com o daemon parado)
 clipsyncd show-address    # mostra IP:porta para o app
 clipsyncd service-install # instala unit systemd de usuário
 clipsyncd service-uninstall
