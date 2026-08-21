@@ -81,7 +81,9 @@ CLIENT                            SERVER
    6 dígitos, o **exibe localmente no daemon** (bandeja/tray ou
    `clipsyncd --show-pin`) e envia `pair_challenge` com `challenge_id`,
    `nonce` e `expires_at`. O client **não** recebe o PIN — ele é
-   digitado pelo usuário a partir da exibição no daemon.
+   digitado pelo usuário a partir da exibição no daemon. O desafio fica
+   associado à conexão que recebeu o `pair_challenge`; o nome anunciado no
+   `hello` não é uma chave de autenticação.
 4. `pair_submit` com PIN correto (digitado) + `challenge_id` + nonce
    corretos → `pair_ok`. PIN errado → `pair_fail` e o servidor fecha a
    conexão.
@@ -175,6 +177,11 @@ desconectado.
 ## Segurança (v0.1)
 
 - WebSocket **sem TLS** na v0.1 — tráfego apenas na LAN confiável.
+- Com `security.local_only = true` (padrão), o daemon aceita WebSocket
+  apenas de endereços loopback, privados ou link-local. Isso é um filtro de
+  endereço, não uma prova de mesma sub-rede ou de SSID.
+- `security.pairing_timeout_secs` controla a validade do desafio e o tempo
+  máximo em que a conexão aguarda `pair_submit`.
 - Pareamento por PIN de 6 dígitos exibido no daemon (`clipsyncd --show-pin`)
   e digitado no app. O PIN **nunca** é transmitido: `pair_challenge`
   responde apenas com `challenge_id`, `nonce` e `expires_at`; o `code`

@@ -37,6 +37,8 @@ pub struct PairChallenge {
     pub expires_at: Instant,
     /// Tentativas restantes.
     pub attempts_left: u8,
+    /// ID da conexão que solicitou o pareamento.
+    pub session_id: String,
     /// Metadata do device que solicitou o pareamento.
     pub device_name: String,
 }
@@ -115,10 +117,9 @@ impl TrustedStore {
 
 /// Gerencia desafios de pareamento ativos e o store de confiados.
 ///
-/// Invariante: existe no máximo UM desafio de pareamento ativo por vez.
-/// `start_challenge` invalida qualquer desafio anterior (mesmo não
-/// expirado), garantindo que `active_pin()` seja determinístico e que o
-/// PIN exibido no tray corresponda ao device que está pareando agora.
+/// Cada desafio pertence a uma única conexão. Desafios de conexões
+/// diferentes podem coexistir; isso evita que o nome apresentado pelo client
+/// seja usado como identidade de autenticação.
 ///
 /// Quando construído com [`PairingManager::new_with_store`], as
 /// alterações de confiança (submit, trust, untrust) são persistidas
@@ -180,15 +181,13 @@ impl PairingManager {
         Ok(())
     }
 
-    /// Cria um novo desafio para um device não-confiado.
-    ///
-    /// O produto pareia um único device por vez, então este método
-    /// invalida (remove) qualquer desafio anterior — mesmo não expirado —
-    /// antes de registrar o novo. Assim, nunca há dois PINs candidatos
-    /// simultaneamente e `active_pin()` permanece determinístico.
-    pub fn start_challenge(&mut self, device_name: &str) -> PairChallenge {
-        self.challenges.clear();
-
+    /// Cria um novo desafio associado exclusivamente a `session_id`.
+    pub fn start_challenge(
+        &mut self,
+        session_id: &str,
+        device_name: &str,
+        ttl: Duration,
+    ) -> PairChallenge {
         let code = generate_pin();
         let nonce = generate_nonce();
         let challenge_id = uuid::Uuid::new_v4().to_string();
@@ -196,13 +195,13 @@ impl PairingManager {
             challenge_id: challenge_id.clone(),
             code: code.clone(),
             nonce: nonce.clone(),
-            expires_at: Instant::now() + DEFAULT_PIN_TTL,
+            expires_at: Instant::now() + ttl,
             attempts_left: MAX_ATTEMPTS,
+            session_id: session_id.to_owned(),
             device_name: device_name.to_owned(),
         };
         debug!(device = %device_name, %code, "novo desafio de pareamento");
-        self.challenges
-            .insert(device_name.to_owned(), challenge.clone());
+        self.challenges.insert(challenge_id, challenge.clone());
         challenge
     }
 
@@ -212,7 +211,7 @@ impl PairingManager {
     /// informada pelo client no handshake `hello`.
     pub fn submit(
         &mut self,
-        device_name: &str,
+        session_id: &str,
         challenge_id: &str,
         nonce: &str,
         code: &str,
@@ -220,11 +219,16 @@ impl PairingManager {
     ) -> Result<DeviceId, PairFailReason> {
         let challenge = self
             .challenges
-            .get_mut(device_name)
+            .get_mut(challenge_id)
             .ok_or(PairFailReason::Expired)?;
 
+        if challenge.session_id != session_id {
+            return Err(PairFailReason::InvalidCode);
+        }
+        let device_name = challenge.device_name.clone();
+
         if challenge.expires_at <= Instant::now() {
-            self.challenges.remove(device_name);
+            self.challenges.remove(challenge_id);
             return Err(PairFailReason::Expired);
         }
 
@@ -239,7 +243,7 @@ impl PairingManager {
         if challenge.code != code {
             challenge.attempts_left = challenge.attempts_left.saturating_sub(1);
             if challenge.attempts_left == 0 {
-                self.challenges.remove(device_name);
+                self.challenges.remove(challenge_id);
                 return Err(PairFailReason::TooManyAttempts);
             }
             return Err(PairFailReason::InvalidCode);
@@ -257,11 +261,17 @@ impl PairingManager {
             trusted: true,
         };
         self.trusted.insert(dev_id.clone(), trusted);
-        self.challenges.remove(device_name);
+        self.challenges.remove(challenge_id);
         // Persiste em disco se configurado.
         let _ = self.persist();
         info!(device = %device_name, id = %dev_id, "device pareado");
         Ok(dev_id)
+    }
+
+    /// Cancela todos os desafios pertencentes a uma conexão encerrada.
+    pub fn cancel_session(&mut self, session_id: &str) {
+        self.challenges
+            .retain(|_, challenge| challenge.session_id != session_id);
     }
 
     /// Marca um device como confiado diretamente (para bootstrap
@@ -316,19 +326,15 @@ impl PairingManager {
         removed
     }
 
-    /// Retorna o PIN do desafio ativo (não expirado), se houver.
+    /// Retorna o PIN mais recente ainda ativo, se houver.
     ///
-    /// Acessor mínimo exposto para o ícone de bandeja do `clipsyncd`
-    /// exibir o PIN de pareamento atual sem acessar internos. Como o
-    /// `PairingManager` mantém no máximo um desafio ativo por vez
-    /// (`start_challenge` invalida os anteriores), o PIN retornado é
-    /// determinístico — nunca há múltiplos candidatos.
+    /// Acessor mínimo exposto para o ícone de bandeja do `clipsyncd`.
     pub fn active_pin(&self) -> Option<String> {
         self.challenges
             .values()
             .filter(|c| c.expires_at > Instant::now())
+            .max_by_key(|c| c.expires_at)
             .map(|c| c.code.clone())
-            .next()
     }
 }
 
@@ -363,9 +369,15 @@ mod tests {
     #[test]
     fn valid_pairing_flow() {
         let mut pm = PairingManager::new();
-        let ch = pm.start_challenge("Pixel 8");
+        let ch = pm.start_challenge("session-1", "Pixel 8", DEFAULT_PIN_TTL);
         let device_id = pm
-            .submit("Pixel 8", &ch.challenge_id, &ch.nonce, &ch.code, "android")
+            .submit(
+                "session-1",
+                &ch.challenge_id,
+                &ch.nonce,
+                &ch.code,
+                "android",
+            )
             .unwrap();
         assert!(pm.is_trusted(&device_id));
     }
@@ -373,27 +385,48 @@ mod tests {
     #[test]
     fn wrong_code_consumes_attempt() {
         let mut pm = PairingManager::new();
-        let ch = pm.start_challenge("Pixel 8");
-        let r = pm.submit("Pixel 8", &ch.challenge_id, &ch.nonce, "000000", "android");
+        let ch = pm.start_challenge("session-1", "Pixel 8", DEFAULT_PIN_TTL);
+        let r = pm.submit(
+            "session-1",
+            &ch.challenge_id,
+            &ch.nonce,
+            "000000",
+            "android",
+        );
         assert_eq!(r, Err(PairFailReason::InvalidCode));
-        assert_eq!(pm.challenges["Pixel 8"].attempts_left, MAX_ATTEMPTS - 1);
+        assert_eq!(
+            pm.challenges[&ch.challenge_id].attempts_left,
+            MAX_ATTEMPTS - 1
+        );
     }
 
     #[test]
     fn wrong_nonce_rejected() {
         let mut pm = PairingManager::new();
-        let ch = pm.start_challenge("Pixel 8");
-        let r = pm.submit("Pixel 8", &ch.challenge_id, "deadbeef", "000000", "android");
+        let ch = pm.start_challenge("session-1", "Pixel 8", DEFAULT_PIN_TTL);
+        let r = pm.submit(
+            "session-1",
+            &ch.challenge_id,
+            "deadbeef",
+            "000000",
+            "android",
+        );
         assert_eq!(r, Err(PairFailReason::InvalidCode));
     }
 
     #[test]
     fn wrong_challenge_id_rejected() {
         let mut pm = PairingManager::new();
-        let ch = pm.start_challenge("Pixel 8");
-        let r = pm.submit("Pixel 8", "ch-inexistente", &ch.nonce, &ch.code, "android");
-        assert_eq!(r, Err(PairFailReason::InvalidCode));
-        assert_eq!(pm.challenges["Pixel 8"].attempts_left, MAX_ATTEMPTS);
+        let ch = pm.start_challenge("session-1", "Pixel 8", DEFAULT_PIN_TTL);
+        let r = pm.submit(
+            "session-1",
+            "ch-inexistente",
+            &ch.nonce,
+            &ch.code,
+            "android",
+        );
+        assert_eq!(r, Err(PairFailReason::Expired));
+        assert_eq!(pm.challenges[&ch.challenge_id].attempts_left, MAX_ATTEMPTS);
     }
 
     #[test]
@@ -405,29 +438,29 @@ mod tests {
     }
 
     #[test]
-    fn two_simultaneous_challenges_keeps_only_the_latest() {
+    fn simultaneous_challenges_are_bound_to_their_sessions() {
         let mut pm = PairingManager::new();
-        let first = pm.start_challenge("Pixel 8");
-        let second = pm.start_challenge("Galaxy S23");
+        let first = pm.start_challenge("session-1", "Pixel 8", DEFAULT_PIN_TTL);
+        let second = pm.start_challenge("session-2", "Galaxy S23", DEFAULT_PIN_TTL);
 
-        // Invariante: apenas um desafio ativo por vez.
-        assert_eq!(pm.challenges.len(), 1);
+        // Conexões diferentes não invalidam o desafio umas das outras.
+        assert_eq!(pm.challenges.len(), 2);
         assert_eq!(pm.active_pin().as_deref(), Some(second.code.as_str()));
 
-        // O desafio anterior foi invalidado: submissão do PIN antigo falha.
+        // O primeiro desafio continua válido na sua própria sessão.
         let r = pm.submit(
-            "Pixel 8",
+            "session-1",
             &first.challenge_id,
             &first.nonce,
             &first.code,
             "android",
         );
-        assert_eq!(r, Err(PairFailReason::Expired));
+        assert!(r.is_ok());
 
-        // O desafio atual permanece válido e pareia normalmente.
+        // O segundo desafio também permanece isolado e pareia normalmente.
         let dev_id = pm
             .submit(
-                "Galaxy S23",
+                "session-2",
                 &second.challenge_id,
                 &second.nonce,
                 &second.code,
@@ -436,6 +469,21 @@ mod tests {
             .unwrap();
         assert!(pm.is_trusted(&dev_id));
         assert_eq!(pm.active_pin(), None);
+    }
+
+    #[test]
+    fn challenge_cannot_be_submitted_by_another_session_with_same_name() {
+        let mut pm = PairingManager::new();
+        let challenge = pm.start_challenge("session-a", "same-name", DEFAULT_PIN_TTL);
+        let result = pm.submit(
+            "session-b",
+            &challenge.challenge_id,
+            &challenge.nonce,
+            &challenge.code,
+            "linux",
+        );
+        assert_eq!(result, Err(PairFailReason::InvalidCode));
+        assert!(pm.challenges.contains_key(&challenge.challenge_id));
     }
 
     #[test]
@@ -521,9 +569,15 @@ mod tests {
 
         // 1) Pareia um device com persistência.
         let mut pm = PairingManager::new_with_store(&path).unwrap();
-        let ch = pm.start_challenge("Pixel 8");
+        let ch = pm.start_challenge("session-1", "Pixel 8", DEFAULT_PIN_TTL);
         let device_id = pm
-            .submit("Pixel 8", &ch.challenge_id, &ch.nonce, &ch.code, "android")
+            .submit(
+                "session-1",
+                &ch.challenge_id,
+                &ch.nonce,
+                &ch.code,
+                "android",
+            )
             .unwrap();
         assert!(pm.is_trusted(&device_id));
         let device_name = pm.device_name(&device_id).unwrap().to_owned();
@@ -569,9 +623,9 @@ mod tests {
     #[test]
     fn submit_propagates_kind() {
         let mut pm = PairingManager::new();
-        let ch = pm.start_challenge("iPhone 15");
+        let ch = pm.start_challenge("session-1", "iPhone 15", DEFAULT_PIN_TTL);
         let device_id = pm
-            .submit("iPhone 15", &ch.challenge_id, &ch.nonce, &ch.code, "ios")
+            .submit("session-1", &ch.challenge_id, &ch.nonce, &ch.code, "ios")
             .unwrap();
         let devices = pm.trusted_devices();
         let device = devices.iter().find(|d| d.id == device_id).unwrap();

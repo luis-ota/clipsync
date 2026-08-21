@@ -128,13 +128,12 @@ impl Default for ClipboardConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SecurityConfig {
-    /// Restringe pareamento a dispositivos na mesma sub-rede.
-    /// Em `local_only = false`, aceita dispositivos de qualquer rede.
+    /// Aceita apenas conexões cujo endereço de origem seja local (loopback,
+    /// privado ou link-local). Isto não prova a mesma sub-rede nem inspeciona
+    /// SSID.
     pub local_only: bool,
     /// Timeout de pareamento (segundos).
     pub pairing_timeout_secs: u64,
-    /// Nome de rede (SSID) permitido. Vazio = qualquer rede.
-    pub allowed_ssid: String,
 }
 
 impl Default for SecurityConfig {
@@ -142,7 +141,6 @@ impl Default for SecurityConfig {
         Self {
             local_only: true,
             pairing_timeout_secs: 120,
-            allowed_ssid: String::new(),
         }
     }
 }
