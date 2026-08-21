@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ClipSync</string>
+    <string name="notification_channel_name">Sincronizacao do clipboard</string>
+</resources>
