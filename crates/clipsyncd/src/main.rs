@@ -176,6 +176,16 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+fn load_config_or_exit() -> Config {
+    match Config::load_or_default(None) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Erro carregando configuração: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Inicia o ícone de bandeja e suas tasks de atualização e comando.
 /// Retorna `None` se o tray não pôde ser iniciado (D-Bus indisponível).
 async fn setup_tray(state: clipsync_core::state::SharedState) -> Option<tray::TrayHandle> {
@@ -392,7 +402,7 @@ async fn main() {
 
     match cli.command {
         Some(Commands::Run { no_tray }) => {
-            let config = Config::load_or_default(None).unwrap_or_default();
+            let config = load_config_or_exit();
             if let Err(e) = cmd_run(config, no_tray).await {
                 eprintln!("Erro: {e}");
                 std::process::exit(1);
@@ -410,7 +420,7 @@ async fn main() {
             }
         }
         None => {
-            if let Err(e) = cmd_run(Config::default(), false).await {
+            if let Err(e) = cmd_run(load_config_or_exit(), false).await {
                 eprintln!("Erro: {e}");
                 std::process::exit(1);
             }

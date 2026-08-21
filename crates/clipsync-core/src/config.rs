@@ -220,6 +220,20 @@ mod tests {
     }
 
     #[test]
+    fn load_or_default_rejects_invalid_toml() {
+        let dir =
+            std::env::temp_dir().join(format!("clipsync-test-invalid-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "[clipboard\n").unwrap();
+
+        let result = Config::load_or_default(Some(&path));
+
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn load_or_default_persists_stable_daemon_device_id() {
         let dir = std::env::temp_dir().join(format!("clipsync-test-{}", std::process::id()));
         let path = dir.join("config-device-id.toml");
