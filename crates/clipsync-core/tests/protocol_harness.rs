@@ -88,7 +88,7 @@ where
     F: FnOnce(SocketAddr, Arc<ServerState>, mpsc::Receiver<ClipboardEvent>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let (state, local_rx) = ServerState::new(ServerConfig::default(), None);
+    let (state, local_rx) = ServerState::new(ServerConfig::default(), None).unwrap();
     let state = Arc::new(state);
     let (addr, handle) = spawn_server(state.clone()).await;
     let result = tokio::time::timeout(TEST_TIMEOUT, body(addr, state, local_rx)).await;
@@ -369,7 +369,7 @@ async fn pair_new_client(ws: &mut WsStream, state: &std::sync::Arc<ServerState>)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_overrides_forged_origin_with_authenticated_device_id() {
-    let (state, _local_rx) = ServerState::new(ServerConfig::default(), None);
+    let (state, _local_rx) = ServerState::new(ServerConfig::default(), None).unwrap();
     let state = std::sync::Arc::new(state);
     let server = Server::new(ServerConfig::default(), state.clone());
     let app = server.router();

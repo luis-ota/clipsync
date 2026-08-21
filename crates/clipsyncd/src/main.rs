@@ -68,9 +68,8 @@ enum Commands {
 /// Roda o daemon: server + watcher de clipboard + mDNS.
 async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error::Error>> {
     let server_config = ServerConfig::from_config(&config);
-    let trusted_path = clipsync_core::config::trusted_devices_path().ok();
-    let (state, mut peer_events_rx) =
-        ServerState::new(server_config.clone(), trusted_path.as_deref());
+    let trusted_path = clipsync_core::config::trusted_devices_path()?;
+    let (state, mut peer_events_rx) = ServerState::new(server_config.clone(), Some(&trusted_path))?;
     let state = std::sync::Arc::new(state);
 
     // Clipboard manager
@@ -392,7 +391,13 @@ async fn main() {
 
     match cli.command {
         Some(Commands::Run { no_tray }) => {
-            let config = Config::load_or_default(None).unwrap_or_default();
+            let config = match Config::load_or_default(None) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("Erro carregando configuração: {e}");
+                    std::process::exit(1);
+                }
+            };
             if let Err(e) = cmd_run(config, no_tray).await {
                 eprintln!("Erro: {e}");
                 std::process::exit(1);
