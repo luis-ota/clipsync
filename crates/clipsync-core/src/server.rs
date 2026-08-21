@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
@@ -31,6 +32,7 @@ pub struct ServerConfig {
     pub bind: String,
     pub name: String,
     pub clipboard: crate::config::ClipboardConfig,
+    pub security: crate::config::SecurityConfig,
     /// ID próprio do daemon (persistido no TOML). Usado como
     /// `origin` estável no anti-eco do watcher.
     pub device_id: Option<DeviceId>,
@@ -42,6 +44,7 @@ impl ServerConfig {
             bind: cfg.bind.clone(),
             name: cfg.name.clone(),
             clipboard: cfg.clipboard.clone(),
+            security: cfg.security.clone(),
             device_id: cfg.device_id.clone(),
         }
     }
@@ -62,6 +65,7 @@ impl Default for ServerConfig {
             bind: DEFAULT_BIND.into(),
             name: DEFAULT_NAME.into(),
             clipboard: crate::config::ClipboardConfig::default(),
+            security: crate::config::SecurityConfig::default(),
             device_id: None,
         }
     }
@@ -119,6 +123,9 @@ async fn ws_handler(
     State(state): State<SharedState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
+    if state.config.security.local_only && !is_local_address(peer_addr.ip()) {
+        return (StatusCode::FORBIDDEN, "conexão remota bloqueada\n").into_response();
+    }
     ws.on_upgrade(move |socket| {
         let addr = peer_addr.to_string();
         debug!(peer = %addr, "WebSocket upgrade aceito");
@@ -132,6 +139,19 @@ async fn ws_handler(
             conn.run().await;
         }
     })
+}
+
+/// Filtro de rede local implementável sem APIs de plataforma. Não valida
+/// SSID nem prova que o peer está na mesma sub-rede.
+fn is_local_address(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
 }
 
 /// Health-check simples.
@@ -205,5 +225,15 @@ mod tests {
         let sc = ServerConfig::from_config(&cfg);
         assert_eq!(sc.bind, "0.0.0.0:8765");
         assert_eq!(sc.name, "linux-desktop");
+    }
+
+    #[test]
+    fn local_only_address_filter_is_explicit() {
+        assert!(is_local_address("127.0.0.1".parse().unwrap()));
+        assert!(is_local_address("192.168.1.10".parse().unwrap()));
+        assert!(is_local_address("fe80::1".parse().unwrap()));
+        assert!(is_local_address("fd00::1".parse().unwrap()));
+        assert!(!is_local_address("8.8.8.8".parse().unwrap()));
+        assert!(!is_local_address("2001:4860:4860::8888".parse().unwrap()));
     }
 }

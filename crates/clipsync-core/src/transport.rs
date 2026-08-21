@@ -71,6 +71,11 @@ impl Connection {
         let result = conn.reader_loop(&mut rx, &mut session).await;
 
         // Desregistra o peer e encerra o writer.
+        conn.state
+            .pairing
+            .lock()
+            .await
+            .cancel_session(session.session_id());
         session.detach().await;
         drop(out_tx);
         let _ = writer.await;
@@ -203,19 +208,31 @@ impl ConnectionInner {
         R: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
     {
         let device_name = device_info.name.clone();
+        let session_id = session.session_id().to_owned();
+        let pairing_timeout = Duration::from_secs(self.config.security.pairing_timeout_secs);
+        let pairing_deadline = tokio::time::Instant::now() + pairing_timeout;
         let (challenge_id, nonce) = {
             let mut pm = self.state.pairing.lock().await;
-            let ch = pm.start_challenge(&device_name);
+            let ch = pm.start_challenge(&session_id, &device_name, pairing_timeout);
             (ch.challenge_id.clone(), ch.nonce.clone())
         };
         info!(peer = %self.addr, device = %device_name, "novo device: desafio de PIN enviado (PIN exibido no daemon)");
         session.send(Message::PairChallenge {
             challenge_id,
-            expires_at: chrono::Utc::now().timestamp() + 120,
+            expires_at: chrono::Utc::now().timestamp()
+                + self.config.security.pairing_timeout_secs as i64,
             nonce,
         });
 
-        while let Some(item) = rx.next().await {
+        loop {
+            let item = match tokio::time::timeout_at(pairing_deadline, rx.next()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_) => {
+                    self.state.pairing.lock().await.cancel_session(&session_id);
+                    return Err(Error::Pairing("tempo de pareamento expirado".into()));
+                }
+            };
             let ws_msg = item.map_err(|e| Error::WebSocket(e.to_string()))?;
             match ws_msg {
                 WsMessage::Text(text) => {
@@ -228,7 +245,7 @@ impl ConnectionInner {
                             challenge_id,
                         } => {
                             let result = self.state.pairing.lock().await.submit(
-                                &device_name,
+                                &session_id,
                                 &challenge_id,
                                 &nonce,
                                 &code,
@@ -251,6 +268,7 @@ impl ConnectionInner {
                                         reason,
                                         message: "PIN inválido ou expirado".into(),
                                     });
+                                    self.state.pairing.lock().await.cancel_session(&session_id);
                                     return Err(Error::Pairing("PIN incorreto".into()));
                                 }
                             }
@@ -271,6 +289,7 @@ impl ConnectionInner {
                 WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Binary(_) => continue,
             }
         }
+        self.state.pairing.lock().await.cancel_session(&session_id);
         Err(Error::Protocol("conexão fechada durante pareamento".into()))
     }
 

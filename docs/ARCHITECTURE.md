@@ -62,9 +62,9 @@ o que acabou de ser sincronizado de um peer.
 ### Segurança
 
 - Pareamento: PIN de 6 dígitos (`PairingManager`). O device envia
-  `hello` com `device.id`; se desconhecido, o servidor gera um
-  `PairChallenge` e espera `PairSubmit`. PIN correto → `pair_ok` +
-  `device_id` persistido pelo client.
+  `hello`; se desconhecido, o servidor gera um `PairChallenge` ligado ao
+  `session_id` desta conexão e espera `PairSubmit`. PIN correto → `pair_ok`
+  + `device_id` persistido pelo client. O nome do device é apenas metadata.
 - `trusted_devices_path()` → `~/.config/clipsync/trusted.toml`.
 - A criptografia por mensagem (AES-GCM) é planejada para v0.2.
 
@@ -97,7 +97,8 @@ enabled = true
 max_image_bytes = 26214400  # 25 MB
 
 [security]
-pin_ttl_secs = 120
+local_only = true
+pairing_timeout_secs = 120
 ```
 
 ## Testes

@@ -165,9 +165,10 @@ backend = "auto"
 max_image_bytes = 25_000_000
 
 [security]
-# Restringe pareamento à mesma sub-rede
+# Aceita apenas endereços locais (privados, loopback ou link-local).
+# Não verifica SSID nem prova a mesma sub-rede.
 local_only = true
-# Bloqueia conexões se não houver PIN válido em N segundos
+# Expira o desafio e a conexão de pareamento após N segundos
 pairing_timeout_secs = 120
 ```
 
