@@ -72,12 +72,12 @@ impl Connection {
         let result = conn.reader_loop(&mut rx, &mut session).await;
 
         // Desregistra o peer e encerra o writer.
-        conn.state
-            .pairing
-            .lock()
-            .await
-            .cancel_session(session.session_id());
+        let session_id = session.session_id().to_owned();
+        conn.state.pairing.lock().await.cancel_session(&session_id);
         session.detach().await;
+        // PeerSession also owns a sender. Drop every producer before
+        // awaiting the writer, otherwise it waits forever for channel EOF.
+        drop(session);
         drop(out_tx);
         let _ = writer.await;
         drop(rx);

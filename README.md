@@ -33,7 +33,7 @@ cirúrgico: **só clipboard, e bem feito**.
 | Descoberta mDNS  | ✅ `_clipsync._tcp.local` |
 | Pareamento por PIN | ✅ 6 dígitos, mostrado no stdout/tray |
 | Múltiplos devices | ✅ |
-| App Android      | ⏳ planejado (Kotlin + Compose) |
+| App Android      | ✅ v0.1 — Kotlin + Compose, texto + imagem |
 | Criptografia E2E | ⏳ planejado para v0.2 |
 | Sincronia de arquivos | ⏳ planejado para v0.3 |
 
@@ -45,8 +45,9 @@ O projeto é um Cargo workspace:
 clipsync/
 ├── crates/
 │   ├── clipsync-core/   # biblioteca: protocolo, WS, mDNS, clipboard, pairing
-│   └── clipsyncd/       # binário do daemon (CLI + tray)
-├── android/             # futuro app Android
+│   ├── clipsyncd/       # binário do daemon (CLI + tray)
+│   └── clipsync-harness/# client de referência e testes manuais
+├── android/             # app Android (Kotlin + Compose)
 ├── docs/                # arquitetura, protocolo
 └── .github/workflows/   # CI
 ```
@@ -195,7 +196,7 @@ Mensagens v0.1:
 - [ ] v0.1 — daemon Rust funcional (texto + imagem, mDNS, pairing)
 - [ ] v0.2 — criptografia E2E (Noise / AES-GCM), HTML rich text
 - [ ] v0.3 — transferência de arquivos, múltiplos PCs
-- [ ] v0.4 — app Android (Kotlin + Compose), foreground service
+- [x] v0.4 — app Android (Kotlin + Compose), foreground service
 - [ ] v0.5 — IME customizado para captura em background
 
 ## Contribuindo

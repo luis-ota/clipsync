@@ -4,13 +4,15 @@ Obrigado por querer contribuir com o `clipsync`! PRs são bem-vindos —
 bugfixes, features, docs, testes, qualquer coisa. Este guia existe para
 deixar a contribuição o mais suave possível.
 
-O projeto é um Cargo workspace com dois crates:
+O projeto é um Cargo workspace com três crates e um app Android:
 
 ```
 clipsync/
 ├── crates/
 │   ├── clipsync-core/   # biblioteca: protocolo, WS, mDNS, clipboard, pairing
-│   └── clipsyncd/       # binário do daemon (CLI + tray)
+│   ├── clipsyncd/       # binário do daemon (CLI + tray)
+│   └── clipsync-harness/# client de referência do protocolo
+├── android/             # app Kotlin + Jetpack Compose
 ├── docs/                # ARCHITECTURE.md, PROTOCOL.md, ANDROID.md
 └── .github/workflows/   # CI
 ```
@@ -99,6 +101,10 @@ cargo test --workspace
 
 # 4. Build completo (binários + testes)
 cargo build --workspace --all-targets
+
+# 5. App Android (requer Android SDK 35)
+cd android
+./gradlew test lint assembleDebug
 ```
 
 Pode rodar o mesmo comando que o CI usa para clippy com warnings
