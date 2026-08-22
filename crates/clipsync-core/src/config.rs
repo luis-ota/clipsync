@@ -110,6 +110,29 @@ pub struct ClipboardConfig {
     pub poll_interval_ms: u64,
 }
 
+impl ClipboardConfig {
+    /// Maior mensagem JSON que pode conter um payload de clipboard válido.
+    ///
+    /// O limite considera a inflação do base64 de imagens e o pior caso de
+    /// escaping de strings JSON (até seis bytes por byte de entrada). Os
+    /// campos de envelope não têm limites próprios, portanto reservamos uma
+    /// margem fixa para metadados do protocolo.
+    pub fn max_websocket_message_bytes(&self) -> usize {
+        const JSON_ENVELOPE_OVERHEAD: u128 = 8 * 1024;
+        let max_usize = usize::MAX as u128;
+        let max_text_json = (self.max_text_bytes as u128)
+            .saturating_mul(6)
+            .saturating_add(JSON_ENVELOPE_OVERHEAD)
+            .min(max_usize);
+        let max_image_json = ((self.max_image_bytes as u128).saturating_add(2) / 3)
+            .saturating_mul(4)
+            .saturating_add(JSON_ENVELOPE_OVERHEAD)
+            .min(max_usize);
+
+        max_text_json.max(max_image_json) as usize
+    }
+}
+
 impl Default for ClipboardConfig {
     fn default() -> Self {
         Self {
@@ -207,6 +230,17 @@ mod tests {
             back.clipboard.max_image_bytes,
             cfg.clipboard.max_image_bytes
         );
+    }
+
+    #[test]
+    fn websocket_limit_covers_clipboard_envelopes() {
+        let cfg = ClipboardConfig::default();
+
+        assert_eq!(
+            cfg.max_websocket_message_bytes(),
+            6 * 16 * 1024 * 1024 + 8 * 1024
+        );
+        assert!(cfg.max_websocket_message_bytes() > 25 * 1024 * 1024 * 4 / 3);
     }
 
     #[test]
