@@ -1,6 +1,9 @@
 [package]
 name = "clipsync-core"
 description = "Núcleo do clipsync: protocolo, WebSocket, mDNS, clipboard, pairing"
+readme = "README.md"
+keywords = ["clipboard", "sync", "websocket", "android"]
+categories = ["network-programming", "os"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

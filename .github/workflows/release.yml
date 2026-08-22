@@ -59,6 +59,28 @@ jobs:
           path: ${{ runner.temp }}/clipsync-dist/*
           if-no-files-found: error
 
+  publish-crates:
+    needs: metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set release version
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: packaging/set-version.sh "$VERSION"
+      - name: Publish clipsync-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo 'CARGO_REGISTRY_TOKEN is not configured; skipping crates.io publication'
+            exit 0
+          fi
+          cargo publish --locked --allow-dirty -p clipsync-core
+
   android:
     needs: metadata
     runs-on: ubuntu-latest

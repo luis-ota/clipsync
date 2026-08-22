@@ -1,5 +1,13 @@
 # clipsync
 
+[![CI](https://github.com/luis-ota/clipsync/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/luis-ota/clipsync/actions/workflows/ci.yml)
+[![Release](https://github.com/luis-ota/clipsync/actions/workflows/release.yml/badge.svg)](https://github.com/luis-ota/clipsync/actions/workflows/release.yml)
+[![crates.io](https://img.shields.io/crates/v/clipsync-core.svg)](https://crates.io/crates/clipsync-core)
+[![docs.rs](https://docs.rs/clipsync-core/badge.svg)](https://docs.rs/clipsync-core)
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)](LICENSE)
+
+> Secure clipboard synchronization between Android, Linux, macOS and Windows.
+
 Sincronização segura de clipboard entre Android, Linux, macOS e Windows. Funciona
 direto na LAN ou através de um relay self-hosted quando os dispositivos estão
 fora da mesma rede.
@@ -52,6 +60,14 @@ do mantenedor e não são embutidas neste repositório.
 - Transferências binárias bounded com chunks de 64 KiB, hash SHA-256 e confirmação Android.
 - Android foreground service, IME para inserção explícita e ações na notificação.
 - Persistência atômica, anti-eco concorrente e credenciais protegidas por Keychain/DPAPI.
+
+## Projeto
+
+- [Documentação de arquitetura](docs/ARCHITECTURE.md)
+- [Protocolo e modelo de ameaças](docs/PROTOCOL.md)
+- [Guia de deploy do relay](docs/DEPLOY.md)
+- [Releases e downloads](https://github.com/luis-ota/clipsync/releases)
+- [Crate `clipsync-core`](https://crates.io/crates/clipsync-core)
 
 ## Artefatos da release
 
