@@ -20,6 +20,7 @@ pub mod config;
 pub mod discovery;
 pub mod dispatch;
 pub mod error;
+pub mod outbound;
 pub mod pairing;
 pub mod peer;
 mod persistence;

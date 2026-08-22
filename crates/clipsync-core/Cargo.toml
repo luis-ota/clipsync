@@ -32,13 +32,14 @@ rustls.workspace = true
 rustls-pemfile.workspace = true
 rcgen.workspace = true
 tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 tower = "0.5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
-tokio-tungstenite.workspace = true
 
 [[bench]]
 name = "perf"

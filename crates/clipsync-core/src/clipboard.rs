@@ -227,7 +227,12 @@ pub struct ClipboardManager {
 impl ClipboardManager {
     /// Constrói um novo manager, selecionando o melhor backend.
     pub fn new() -> Result<Self> {
-        let backend = Self::pick_backend();
+        Self::new_with_backend("auto")
+    }
+
+    /// Constrói usando `auto`, `wayland` ou `x11` explicitamente.
+    pub fn new_with_backend(preference: &str) -> Result<Self> {
+        let backend = Self::pick_backend(preference)?;
         info!(backend = backend.name(), "clipboard backend selected");
         Ok(Self {
             backend,
@@ -254,16 +259,36 @@ impl ClipboardManager {
         }
     }
 
-    fn pick_backend() -> BackendKind {
+    fn pick_backend(preference: &str) -> Result<BackendKind> {
+        match preference {
+            "auto" => {}
+            "wayland"
+                if std::env::var_os("WAYLAND_DISPLAY").is_some()
+                    || std::env::var_os("WAYLAND_SOCKET").is_some() =>
+            {
+                return Ok(BackendKind::Wayland)
+            }
+            "x11" if std::env::var_os("DISPLAY").is_some() => return Ok(BackendKind::X11),
+            "wayland" | "x11" => {
+                return Err(Error::Clipboard(format!(
+                    "backend {preference} solicitado, mas a sessão não está disponível"
+                )))
+            }
+            other => {
+                return Err(Error::Config(format!(
+                    "clipboard.backend inválido: {other}; use auto, wayland ou x11"
+                )))
+            }
+        }
         if std::env::var_os("WAYLAND_DISPLAY").is_some()
             || std::env::var_os("WAYLAND_SOCKET").is_some()
         {
-            return BackendKind::Wayland;
+            return Ok(BackendKind::Wayland);
         }
         if std::env::var_os("DISPLAY").is_some() {
-            return BackendKind::X11;
+            return Ok(BackendKind::X11);
         }
-        BackendKind::Headless
+        Ok(BackendKind::Headless)
     }
 
     pub fn backend_kind(&self) -> BackendKind {
@@ -277,12 +302,10 @@ impl ClipboardManager {
         let tools = detect_clipboard_tools().await;
         match self.backend {
             BackendKind::Wayland if !tools.has_wayland() => Err(Error::Clipboard(
-                "wl-copy/wl-paste não encontrados. \
-                 Instale com: sudo pacman -S wl-clipboard"
-                    .into(),
+                "wl-copy/wl-paste não encontrados; instale o pacote wl-clipboard".into(),
             )),
             BackendKind::X11 if !tools.has_x11() => Err(Error::Clipboard(
-                "xclip não encontrado. Instale com: sudo pacman -S xclip".into(),
+                "xclip não encontrado; instale o pacote xclip".into(),
             )),
             _ => Ok(()),
         }
@@ -584,5 +607,10 @@ mod tests {
         assert!(watcher.last_self_write.matches(&sha));
         watcher.last_self_write.clear();
         assert!(!watcher.last_self_write.matches(&sha));
+    }
+
+    #[test]
+    fn invalid_backend_is_rejected_instead_of_silently_falling_back() {
+        assert!(ClipboardManager::new_with_backend("gtk").is_err());
     }
 }

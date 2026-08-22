@@ -11,49 +11,56 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  check:
-    name: check
+  linux:
+    name: linux-${{ matrix.name }}
     runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian
+            container: debian:bookworm
+          - name: ubuntu
+            container: ubuntu:24.04
+          - name: fedora
+            container: fedora:40
+          - name: arch
+            container: archlinux:base
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install system deps
+      - name: Install Rust and clipboard tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            xclip \
-            wl-clipboard
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          if command -v apt-get >/dev/null; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates build-essential pkg-config xclip wl-clipboard
+          elif command -v dnf >/dev/null; then
+            dnf install -y curl ca-certificates gcc gcc-c++ make pkg-config xclip wl-clipboard
+          else
+            pacman -Sy --noconfirm curl ca-certificates base-devel xclip wl-clipboard
+          fi
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          . "$HOME/.cargo/env"
+          rustup component add rustfmt clippy
 
       - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+        run: . "$HOME/.cargo/env" && cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --no-deps
+        run: . "$HOME/.cargo/env" && cargo clippy --workspace --all-targets --no-deps
 
       - name: cargo build
-        run: cargo build --workspace --all-targets
+        run: . "$HOME/.cargo/env" && cargo build --workspace --all-targets
 
       - name: cargo test
-        run: cargo test --workspace --no-fail-fast
+        run: . "$HOME/.cargo/env" && cargo test --workspace --no-fail-fast
 
       - name: Validate deployment configuration
-        run: cargo run -p clipsyncd -- validate-config --config deploy/config/relay.toml
+        run: . "$HOME/.cargo/env" && cargo run -p clipsyncd -- validate-config --config deploy/config/relay.toml
 
-      - name: Validate compose file
-        run: cp deploy/.env.example deploy/.env && docker compose -f deploy/docker-compose.yml config --quiet
+      - name: Smoke CLI
+        run: . "$HOME/.cargo/env" && cargo run -q -p clipsyncd -- --help && XDG_CONFIG_HOME="$RUNNER_TEMP/clipsync-${{ matrix.name }}" cargo run -q -p clipsyncd -- endpoints list
 
   audit:
     name: audit

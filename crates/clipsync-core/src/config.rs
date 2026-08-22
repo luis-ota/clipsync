@@ -76,9 +76,8 @@ impl Default for Config {
     }
 }
 
-/// Metadados de destino exportáveis para um cliente. O daemon Linux não usa
-/// esta lista para abrir conexões de saída; `credential_ref` é uma referência
-/// opaca para o consumidor que implementa a conexão.
+/// Destino outbound persistido. `credential_ref` é uma referência opaca, nunca
+/// o bearer em si.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EndpointConfig {
     pub name: String,
@@ -89,6 +88,17 @@ pub struct EndpointConfig {
     pub tls_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
+    /// LAN não usa bearer; relay exige bearer.
+    #[serde(default)]
+    pub scope: EndpointScope,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointScope {
+    #[default]
+    Lan,
+    Relay,
 }
 
 impl EndpointConfig {
@@ -109,6 +119,28 @@ impl EndpointConfig {
         {
             return Err(Error::Config(format!(
                 "endpoint '{}' exige fingerprint TLS SHA-256",
+                self.name
+            )));
+        }
+        if matches!(self.transport, Transport::Tls)
+            && self
+                .tls_fingerprint
+                .as_deref()
+                .and_then(|pin| hex::decode(pin.replace(':', "")).ok())
+                .as_ref()
+                .map(Vec::len)
+                != Some(32)
+        {
+            return Err(Error::Config(format!(
+                "endpoint '{}' exige fingerprint TLS hexadecimal SHA-256",
+                self.name
+            )));
+        }
+        if matches!(self.scope, EndpointScope::Relay)
+            && self.credential_ref.as_deref().map_or(true, str::is_empty)
+        {
+            return Err(Error::Config(format!(
+                "endpoint relay '{}' exige credential_ref",
                 self.name
             )));
         }
@@ -231,6 +263,17 @@ pub struct SecurityConfig {
     pub tls_fingerprint: Option<String>,
     /// Nomes DNS incluidos no SAN da identidade gerada.
     pub tls_server_names: Vec<String>,
+    /// Seleção outbound: LAN, relay ou auto (LAN antes de relay).
+    pub outbound_route: OutboundRoute,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundRoute {
+    Lan,
+    Relay,
+    #[default]
+    Auto,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -251,6 +294,7 @@ impl Default for SecurityConfig {
             tls_key_path: None,
             tls_fingerprint: None,
             tls_server_names: vec!["localhost".into()],
+            outbound_route: OutboundRoute::Auto,
         }
     }
 }
@@ -450,6 +494,7 @@ mod tests {
             transport: Transport::Tls,
             tls_fingerprint: Some("a".repeat(64)),
             credential_ref: Some("CLIPSYNC_RELAY_TOKEN".into()),
+            scope: EndpointScope::Relay,
         };
         assert!(endpoint.validate().is_ok());
         assert!(EndpointConfig {

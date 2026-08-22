@@ -1,7 +1,7 @@
 # clipsync
 
-> **Clipboard universal entre Android e Linux via LAN.**
-> Zero cloud. Zero conta. Zero servidor externo.
+> **Clipboard universal entre Android e Linux via LAN ou relay opcional.**
+> O relay é um componente self-hosted; não há serviço cloud obrigatório.
 
 `clipsync` sincroniza o clipboard entre o seu celular Android e o seu PC Linux
 (em Wayland ou X11) pela rede local. Copiou no celular → cola no PC.
@@ -96,6 +96,21 @@ de pares confiáveis (persistido em `~/.config/clipsync/trusted.toml`).
 Conexões subsequentes do mesmo device são aceitas direto. O daemon mantém um
 único desafio ativo, de acordo com o único PIN apresentado no tray.
 
+## Linux suportado
+
+O daemon é headless-first e não finge oferecer uma GUI: a bandeja é opcional e
+depende de D-Bus/SNI. A sincronização funciona com Wayland, X11 ou sem display
+(modo headless, útil para relay e CI).
+
+| Distribuição | Pacotes de clipboard | Backend |
+|---|---|---|
+| Debian 12 / Ubuntu 22.04+ | `wl-clipboard`, `xclip` | Wayland / X11 |
+| Fedora 40+ | `wl-clipboard`, `xclip` | Wayland / X11 |
+| Arch Linux | `wl-clipboard`, `xclip` | Wayland / X11 |
+
+Instale `cargo`/Rust pelo método oficial da distribuição ou `rustup`. O CI
+testa as quatro famílias sem depender de desktop ou Android.
+
 ## Instalação (daemon)
 
 ### Arch Linux
@@ -118,6 +133,9 @@ Em X11, o daemon usa `xclip` automaticamente:
 ```bash
 sudo pacman -S xclip
 ```
+
+Em Debian/Ubuntu use `sudo apt install wl-clipboard xclip`; em Fedora use
+`sudo dnf install wl-clipboard xclip`.
 
 O backend X11 consulta os `TARGETS` do clipboard e lê/escreve `image/png` ou
 `image/jpeg` com `xclip -target <mime>`. O backend não converte imagens em
@@ -148,6 +166,13 @@ clipsyncd untrust <device-id>
 
 # Mostrar endereço de descoberta
 clipsyncd show-address
+
+# Gerenciar conexões outbound Linux
+clipsyncd endpoints add relay wss://relay.example.invalid/ws --scope relay \
+  --tls-fingerprint <sha256-der> --credential-ref CLIPSYNC_RELAY_TOKEN
+clipsyncd endpoints list
+clipsyncd endpoints test relay
+clipsyncd endpoints remove relay
 ```
 
 As gravações de `config.toml` e `trusted.toml` são atômicas. Enquanto está
@@ -191,7 +216,22 @@ local_only = true
 pairing_timeout_secs = 120
 # TLS é obrigatório por padrão; plaintext_legacy só para rede privada/proxy.
 transport = "tls"
+# Seleção outbound: "lan", "relay" ou "auto" (LAN primeiro)
+outbound_route = "auto"
 ```
+
+### Relay outbound
+
+Um endpoint `relay` usa `wss://.../ws`, bearer no header `Authorization` e
+pin SHA-256 do certificado DER. `credential_ref` é apenas uma referência: por
+exemplo `CLIPSYNC_RELAY_TOKEN` lê a variável de ambiente, e
+`file:/etc/clipsync/relay.token` lê um arquivo que deve ser `0600`. O token não
+é salvo no TOML nem na URL. Em `auto`, endpoints LAN são tentados antes dos
+relays; uma queda reconecta usando o próximo endpoint configurado.
+
+O token relay precisa ser provisionado para o mesmo `device_id` persistido no
+TOML. O relay fornece transporte TLS hop-to-hop, não E2E contra o operador do
+relay. A rotação de certificado exige atualizar o pin antes de reconectar.
 
 ## Protocolo
 

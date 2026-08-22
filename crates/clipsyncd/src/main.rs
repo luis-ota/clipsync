@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use clipsync_core::clipboard::{ClipboardEvent, ClipboardManager};
-use clipsync_core::config::{Config, EndpointConfig, Transport};
+use clipsync_core::config::{Config, EndpointConfig, EndpointScope, Transport};
 use clipsync_core::discovery::Discovery;
 use clipsync_core::dispatch;
 use clipsync_core::server::{Server, ServerConfig};
@@ -67,8 +67,7 @@ enum Commands {
         #[arg(long, value_name = "PATH")]
         config: Option<std::path::PathBuf>,
     },
-    /// Gerencia configuração de endpoints para clientes externos. O daemon
-    /// Linux não abre conexões de saída nem afirma conexão relay.
+    /// Gerencia conexões outbound LAN/relay do daemon Linux.
     Endpoints {
         #[command(subcommand)]
         command: EndpointCommands,
@@ -87,11 +86,16 @@ enum EndpointCommands {
         tls_fingerprint: Option<String>,
         #[arg(long)]
         credential_ref: Option<String>,
+        #[arg(long, default_value = "lan")]
+        scope: String,
     },
     Remove {
         name: String,
     },
     Select {
+        name: String,
+    },
+    Test {
         name: String,
     },
 }
@@ -106,9 +110,11 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     let trusted_path = clipsync_core::config::trusted_devices_path()?;
     let (state, mut peer_events_rx) = ServerState::new(server_config.clone(), Some(&trusted_path))?;
     let state = std::sync::Arc::new(state);
+    let outbound_tx =
+        clipsync_core::outbound::OutboundManager::spawn(config.clone(), state.local_events.clone());
 
     // Clipboard manager
-    let clipboard = ClipboardManager::new()?;
+    let clipboard = ClipboardManager::new_with_backend(&server_config.clipboard.backend)?;
     if let Err(e) = clipboard.check_tools().await {
         warn!(error = %e, "ferramentas de clipboard ausentes; modo headless");
     }
@@ -162,7 +168,9 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
                 ClipboardEvent::Changed(snap) => {
                     if let Some(msg) = dispatch::event_to_message(&snap, &clipboard_cfg, &daemon_id)
                     {
-                        state_watcher.broadcast_except(Arc::new(msg), None).await;
+                        let msg = Arc::new(msg);
+                        state_watcher.broadcast_except(Arc::clone(&msg), None).await;
+                        let _ = outbound_tx.send(msg).await;
                     }
                 }
                 ClipboardEvent::BackendLost(e) => {
@@ -253,7 +261,7 @@ fn config_path_or_exit() -> std::path::PathBuf {
     }
 }
 
-fn cmd_endpoints(command: EndpointCommands) {
+async fn cmd_endpoints(command: EndpointCommands) {
     let path = config_path_or_exit();
     let mut config = match Config::load_or_default(Some(&path)) {
         Ok(config) => config,
@@ -266,9 +274,10 @@ fn cmd_endpoints(command: EndpointCommands) {
         EndpointCommands::List => {
             for endpoint in &config.endpoints {
                 println!(
-                    "{} {} transport={:?} pin={} credential_ref={}",
+                    "{} {} scope={:?} transport={:?} pin={} credential_ref={}",
                     endpoint.name,
                     endpoint.url,
+                    endpoint.scope,
                     endpoint.transport,
                     endpoint
                         .tls_fingerprint
@@ -285,6 +294,7 @@ fn cmd_endpoints(command: EndpointCommands) {
             transport,
             tls_fingerprint,
             credential_ref,
+            scope,
         } => {
             let transport = match transport.as_str() {
                 "tls" => Transport::Tls,
@@ -300,6 +310,14 @@ fn cmd_endpoints(command: EndpointCommands) {
                 transport,
                 tls_fingerprint,
                 credential_ref,
+                scope: match scope.as_str() {
+                    "lan" => EndpointScope::Lan,
+                    "relay" => EndpointScope::Relay,
+                    _ => {
+                        eprintln!("scope deve ser lan ou relay");
+                        std::process::exit(2);
+                    }
+                },
             };
             if let Err(error) = endpoint.validate() {
                 eprintln!("Erro no endpoint: {error}");
@@ -337,6 +355,22 @@ fn cmd_endpoints(command: EndpointCommands) {
                 std::process::exit(1);
             });
             println!("Endpoint '{name}' selecionado como fallback primário.");
+        }
+        EndpointCommands::Test { name } => {
+            let endpoint = match config.endpoints.iter().find(|item| item.name == name) {
+                Some(endpoint) => endpoint,
+                None => {
+                    eprintln!("Endpoint não encontrado: {name}");
+                    std::process::exit(1);
+                }
+            };
+            match clipsync_core::outbound::test_endpoint(endpoint).await {
+                Ok(()) => println!("Endpoint '{name}' acessível e TLS/bearer válidos."),
+                Err(error) => {
+                    eprintln!("Teste do endpoint '{name}' falhou: {error}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }
@@ -575,7 +609,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Commands::Endpoints { command }) => cmd_endpoints(command),
+        Some(Commands::Endpoints { command }) => cmd_endpoints(command).await,
         Some(Commands::ValidateConfig { config }) => {
             let config = load_config_or_exit(config.as_deref());
             println!(
@@ -669,6 +703,7 @@ mod tests {
             transport: Transport::Tls,
             tls_fingerprint: Some("a".repeat(64)),
             credential_ref: Some("TOKEN_ENV".into()),
+            scope: EndpointScope::Relay,
         };
         assert!(!format!("{endpoint:?}").contains("secret"));
         assert!(endpoint.validate().is_ok());
