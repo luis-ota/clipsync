@@ -47,6 +47,7 @@ jobs:
         env:
           CLIPSYNC_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
+          packaging/set-version.sh "$CLIPSYNC_VERSION"
           cargo test --workspace --no-fail-fast
           packaging/build-release.sh "$RUNNER_TEMP/clipsync-dist"
           sed "s/^pkgver=.*/pkgver=${CLIPSYNC_VERSION}/" packaging/PKGBUILD > "$RUNNER_TEMP/clipsync-dist/PKGBUILD"
@@ -100,7 +101,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --locked --release -p clipsync-client
+      - name: Set release version
+        shell: bash
+        run: packaging/set-version.sh "${{ needs.metadata.outputs.version }}"
+      - name: Build desktop client
+        shell: bash
+        run: cargo build --locked --release -p clipsync-client
       - name: Stage desktop binary
         shell: bash
         run: |
