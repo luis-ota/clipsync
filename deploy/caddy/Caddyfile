@@ -1,0 +1,4 @@
+# TLS termina no Caddy; o backend usa plaintext_legacy apenas na rede privada.
+relay.example.com {
+    reverse_proxy clipsyncd:8765
+}

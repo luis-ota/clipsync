@@ -3,7 +3,10 @@
 //! Expõe um endpoint `/ws` que aceita conexões de clients (apps
 //! Android) e serve um health-check em `/healthz`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::WebSocketUpgrade;
@@ -33,6 +36,7 @@ pub struct ServerConfig {
     pub name: String,
     pub clipboard: crate::config::ClipboardConfig,
     pub security: crate::config::SecurityConfig,
+    pub limits: crate::config::LimitsConfig,
     /// ID próprio do daemon (persistido no TOML). Usado como
     /// `origin` estável no anti-eco do watcher.
     pub device_id: DeviceId,
@@ -45,6 +49,7 @@ impl ServerConfig {
             name: cfg.name.clone(),
             clipboard: cfg.clipboard.clone(),
             security: cfg.security.clone(),
+            limits: cfg.limits.clone(),
             device_id: cfg.device_id.clone().unwrap_or_default(),
         }
     }
@@ -66,6 +71,7 @@ impl Default for ServerConfig {
             name: DEFAULT_NAME.into(),
             clipboard: crate::config::ClipboardConfig::default(),
             security: crate::config::SecurityConfig::default(),
+            limits: crate::config::LimitsConfig::default(),
             device_id: DeviceId::new(),
         }
     }
@@ -76,6 +82,73 @@ impl Default for ServerConfig {
 pub struct Server {
     pub config: ServerConfig,
     pub state: SharedState,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Admission {
+    active: std::sync::Arc<AtomicUsize>,
+    windows: std::sync::Arc<tokio::sync::Mutex<HashMap<std::net::IpAddr, Window>>>,
+    limits: crate::config::LimitsConfig,
+}
+
+#[derive(Debug, Clone)]
+struct Window {
+    started: Instant,
+    messages: u32,
+    bytes: u64,
+}
+
+impl Admission {
+    pub(crate) fn new(limits: crate::config::LimitsConfig) -> Self {
+        Self {
+            active: Default::default(),
+            windows: Default::default(),
+            limits,
+        }
+    }
+
+    pub(crate) fn try_connection(&self) -> bool {
+        let n = self.active.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.limits.max_connections != 0 && n > self.limits.max_connections {
+            self.active.fetch_sub(1, Ordering::Relaxed);
+            false
+        } else {
+            true
+        }
+    }
+
+    pub(crate) fn release_connection(&self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn allow_message(&self, ip: std::net::IpAddr, bytes: usize) -> bool {
+        if self.limits.messages_per_minute == 0 && self.limits.bytes_per_minute == 0 {
+            return true;
+        }
+        let mut windows = self.windows.lock().await;
+        let now = Instant::now();
+        let window = windows.entry(ip).or_insert(Window {
+            started: now,
+            messages: 0,
+            bytes: 0,
+        });
+        if now.duration_since(window.started) >= Duration::from_secs(60) {
+            *window = Window {
+                started: now,
+                messages: 0,
+                bytes: 0,
+            };
+        }
+        let allowed = (self.limits.messages_per_minute == 0
+            || window.messages < self.limits.messages_per_minute)
+            && (self.limits.bytes_per_minute == 0
+                || window.bytes.saturating_add(bytes as u64) <= self.limits.bytes_per_minute);
+        if allowed {
+            window.messages += 1;
+            window.bytes = window.bytes.saturating_add(bytes as u64);
+        }
+        allowed
+    }
 }
 
 impl Server {
@@ -154,6 +227,7 @@ impl Server {
         Router::new()
             .route("/ws", get(ws_handler))
             .route("/healthz", get(healthz))
+            .route("/readyz", get(readyz))
             .with_state(self.state.clone())
     }
 }
@@ -164,7 +238,16 @@ async fn ws_handler(
     State(state): State<SharedState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
+    let admission = state.admission.clone();
+    if !admission.try_connection() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "connection quota exceeded\n",
+        )
+            .into_response();
+    }
     if state.config.security.local_only && !is_local_address(peer_addr.ip()) {
+        admission.release_connection();
         return (StatusCode::FORBIDDEN, "conexão remota bloqueada\n").into_response();
     }
     let max_message_size = state.config.clipboard.max_websocket_message_bytes();
@@ -181,6 +264,7 @@ async fn ws_handler(
             };
             async move {
                 conn.run().await;
+                admission.release_connection();
             }
         })
 }
@@ -201,6 +285,17 @@ fn is_local_address(ip: std::net::IpAddr) -> bool {
 /// Health-check simples.
 async fn healthz() -> impl IntoResponse {
     "clipsync daemon ok\n"
+}
+
+async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
+    if state.shutdown.is_cancelled() {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "clipsync daemon not ready\n",
+        )
+    } else {
+        (StatusCode::OK, "clipsync daemon ready\n")
+    }
 }
 
 #[cfg(test)]

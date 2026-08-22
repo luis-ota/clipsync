@@ -362,6 +362,21 @@ impl ConnectionInner {
                 return Ok(ControlFlow::Break(()));
             }
         };
+        let frame_bytes = match &ws_msg {
+            WsMessage::Text(text) => text.len(),
+            WsMessage::Binary(data) => data.len(),
+            WsMessage::Ping(data) | WsMessage::Pong(data) => data.len(),
+            WsMessage::Close(_) => 0,
+        };
+        if !self
+            .state
+            .admission
+            .allow_message(self.addr.ip(), frame_bytes)
+            .await
+        {
+            warn!(peer = %self.addr, "rate limit exceeded; closing connection");
+            return Err(Error::Protocol("rate limit exceeded".into()));
+        }
         match ws_msg {
             WsMessage::Text(text) => {
                 let msg: Message = match serde_json::from_str(&text) {

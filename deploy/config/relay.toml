@@ -1,0 +1,30 @@
+# Configuração do clipsyncd para operação headless.
+bind = "0.0.0.0:8765"
+name = "clipsync-relay"
+# Substitua por um UUID único antes de publicar esta instância.
+device_id = "00000000-0000-4000-8000-000000000001"
+
+[discovery]
+enable_mdns = false
+service_type = "_clipsync._tcp.local."
+
+[clipboard]
+sync_text = true
+sync_images = true
+sync_html = false
+sync_files = false
+backend = "auto"
+max_image_bytes = 26214400
+max_text_bytes = 16777216
+poll_interval_ms = 1000
+
+[limits]
+max_connections = 256
+messages_per_minute = 120
+bytes_per_minute = 67108864
+
+[security]
+transport = "tls"
+local_only = false
+pairing_timeout_secs = 120
+# Em produção, defina tls_cert_path/tls_key_path e tls_fingerprint.

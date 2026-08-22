@@ -250,7 +250,8 @@ impl PairingManager {
             session_id: session_id.to_owned(),
             device_name: device_name.to_owned(),
         };
-        debug!(device = %device_name, %code, "novo desafio de pareamento");
+        // O PIN só pode ser exibido localmente; nunca vai para logs coletáveis.
+        debug!(device = %device_name, "novo desafio de pareamento");
         self.challenge = Some(challenge.clone());
         challenge
     }

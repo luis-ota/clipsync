@@ -231,6 +231,8 @@ desconectado.
 
 - `wss://<host>:8765/ws` — websocket principal, com pinning mDNS.
 - `https://<host>:8765/healthz` — healthcheck (200/ok), com o mesmo pin TLS.
+- `https://<host>:8765/readyz` — readiness (200 enquanto aceita conexões; 503
+  durante shutdown), com o mesmo pin TLS.
 - `http://<host>:8765/` — info JSON do daemon (name, version).
 
 ## Detecção na LAN (mDNS)

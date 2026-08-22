@@ -56,6 +56,8 @@ Docs detalhados: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/PROTOCOL.md`](docs/PROTOCOL.md) e
 [`docs/ANDROID.md`](docs/ANDROID.md) (guia do app).
 
+Deploy operacional do `clipsyncd` headless: [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
 ### Como funciona (clipboard bidirecional)
 
 1. **PC → Android**
@@ -157,7 +159,6 @@ de `untrust` falha em vez de competir com o estado em memória.
 `~/.config/clipsync/config.toml`:
 
 ```toml
-[server]
 bind = "0.0.0.0:8765"
 name = "luis-arch"
 
@@ -175,6 +176,12 @@ sync_files = false         # v0.3
 backend = "auto"
 # Limite de tamanho (bytes) para imagens
 max_image_bytes = 25_000_000
+max_text_bytes = 16_777_216
+
+[limits]
+max_connections = 256
+messages_per_minute = 120
+bytes_per_minute = 67_108_864
 
 [security]
 # Aceita apenas endereços locais (privados, loopback ou link-local).
@@ -182,6 +189,8 @@ max_image_bytes = 25_000_000
 local_only = true
 # Expira o desafio e a conexão de pareamento após N segundos
 pairing_timeout_secs = 120
+# TLS é obrigatório por padrão; plaintext_legacy só para rede privada/proxy.
+transport = "tls"
 ```
 
 ## Protocolo

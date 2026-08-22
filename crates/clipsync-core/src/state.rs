@@ -61,6 +61,7 @@ pub struct ServerState {
     pub local_events: mpsc::Sender<crate::clipboard::ClipboardEvent>,
     /// Sinal de shutdown global.
     pub shutdown: CancellationToken,
+    pub(crate) admission: crate::server::Admission,
 }
 
 impl ServerState {
@@ -77,6 +78,7 @@ impl ServerState {
             Some(path) => PairingManager::new_with_store(path)?,
             None => PairingManager::new(),
         };
+        let admission = crate::server::Admission::new(config.limits.clone());
         let state = Self {
             config,
             pairing: Mutex::new(pm),
@@ -84,6 +86,7 @@ impl ServerState {
             sent_clipboard: Mutex::new(HashMap::new()),
             local_events: tx,
             shutdown: CancellationToken::new(),
+            admission,
         };
         Ok((state, rx))
     }

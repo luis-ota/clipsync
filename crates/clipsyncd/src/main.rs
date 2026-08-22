@@ -38,6 +38,9 @@ struct Cli {
 enum Commands {
     /// Inicia o daemon (modo foreground com logs e PIN).
     Run {
+        /// Arquivo TOML de configuração (ou CLIPSYNC_CONFIG).
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
         /// Desativa o ícone de bandeja (modo headless).
         /// Também pode ser ativado via CLIPSYNC_NO_TRAY=1.
         #[arg(long, env = "CLIPSYNC_NO_TRAY")]
@@ -58,6 +61,11 @@ enum Commands {
         /// Tempo máximo de espera pela descoberta, em segundos.
         #[arg(long, default_value_t = 5)]
         timeout: u64,
+    },
+    /// Valida a configuração sem iniciar o daemon.
+    ValidateConfig {
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
     },
 }
 
@@ -83,7 +91,11 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     let clipboard_writer = clipboard.share_self_write();
 
     // mDNS announce
-    let discovery = Discovery::new()?;
+    let discovery = if config.discovery.enable_mdns {
+        Some(Discovery::new()?)
+    } else {
+        None
+    };
     let port = server_config.port();
     let daemon_id = server_config.device_id.clone();
     let tls_identity = if matches!(
@@ -96,13 +108,17 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     } else {
         None
     };
-    if let Err(e) = discovery.announce(
-        &server_config.name,
-        port,
-        &daemon_id,
-        tls_identity.as_ref().map(|i| i.fingerprint.as_str()),
-    ) {
-        warn!(error = %e, "falha anunciando serviço mDNS");
+    if let Some(discovery) = discovery.as_ref() {
+        if let Err(e) = discovery.announce(
+            &server_config.name,
+            port,
+            &daemon_id,
+            tls_identity.as_ref().map(|i| i.fingerprint.as_str()),
+        ) {
+            warn!(error = %e, "falha anunciando serviço mDNS");
+        }
+    } else {
+        info!("mDNS desativado pela configuração");
     }
 
     // Watcher: clipboard local → peers (broadcast)
@@ -190,8 +206,8 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-fn load_config_or_exit() -> Config {
-    match Config::load_or_default(None) {
+fn load_config_or_exit(path: Option<&std::path::Path>) -> Config {
+    match Config::load_or_default_env(path) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("Erro carregando configuração: {error}");
@@ -416,8 +432,8 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Run { no_tray }) => {
-            let config = load_config_or_exit();
+        Some(Commands::Run { no_tray, config }) => {
+            let config = load_config_or_exit(config.as_deref());
             if let Err(e) = cmd_run(config, no_tray).await {
                 eprintln!("Erro: {e}");
                 std::process::exit(1);
@@ -434,8 +450,15 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Commands::ValidateConfig { config }) => {
+            let config = load_config_or_exit(config.as_deref());
+            println!(
+                "configuração válida: bind={} name={}",
+                config.bind, config.name
+            );
+        }
         None => {
-            if let Err(e) = cmd_run(load_config_or_exit(), false).await {
+            if let Err(e) = cmd_run(load_config_or_exit(None), false).await {
                 eprintln!("Erro: {e}");
                 std::process::exit(1);
             }
