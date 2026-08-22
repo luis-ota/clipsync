@@ -82,7 +82,9 @@ testes do backend são puros e não precisam de display.
 - O daemon mantém ownership exclusivo de `trusted.toml` por lock
   interprocesso. `untrust` opera offline e recusa a mutação enquanto o daemon
   estiver ativo, evitando divergência entre disco e memória.
-- A criptografia por mensagem (AES-GCM) é planejada para v0.2.
+- Relay: payloads usam AES-256-GCM E2E com nonce aleatório, AAD de roteamento,
+  sequência anti-replay e `key_id` para rotação. Chaves são provisionadas fora
+  do relay; o caminho LAN direto permanece compatível com `Message` e TLS.
 
 ## Crate `clipsyncd`
 

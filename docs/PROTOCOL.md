@@ -221,12 +221,21 @@ estritamente crescente por `SessionId`, e autorização de `source` e
 cross-group forwarding, destino não membro, source forjado e replay. Depois
 da validação, `origin` é sobrescrito pelo source autenticado.
 
-O protocolo v1 não adiciona E2E retroativamente: os clientes atuais não
-negociam chaves nem entendem um envelope cifrado. O transporte TLS fornece
-confidencialidade hop-to-hop, não E2E contra o relay. A extensão E2E deve ser
-uma mudança de compatibilidade (negociação de chave efêmera autenticada,
-AEAD, nonce/contador e rotação) antes de ser ativada no wire; registrar como
-issue separado, sem tratar o bearer token ou TLS como E2E.
+Frames relay de clipboard usam `type=relay_envelope` com `key_id`, `nonce` e
+`ciphertext` base64. O plaintext é uma `Message` JSON, cifrada com AES-256-GCM
+por uma chave de grupo provisionada aos endpoints fora do relay. O AAD vincula
+`session_id`, `source`, `destination`, `group`, `sequence` e `key_id`; portanto
+alterar roteamento ou sequência falha na autenticação. `sequence` deve ser
+estritamente crescente por sessão e impede replay no relay. `RelayKeyRing`
+mantém chaves anteriores durante rotação; remova a chave antiga após todos os
+peers receberem a nova. O relay nunca possui a chave nem desserializa o
+clipboard.
+
+Compatibilidade é explícita: o caminho LAN/WebSocket direto mantém as mensagens
+`clipboard_*` legadas e continua protegido pelo TLS configurado. O endpoint
+relay rejeita `clipboard_*` em claro; clientes relay precisam suportar o
+envelope E2E. TLS/bearer continuam necessários para autenticar e proteger o
+hop, mas não são considerados E2E.
 
 - O transporte padrão é `wss://`. O daemon gera uma identidade autoassinada
   persistente (`tls-cert.der`/`tls-key.der`, chave com modo 0600). A confiança

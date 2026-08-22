@@ -24,6 +24,7 @@ pub mod pairing;
 pub mod peer;
 mod persistence;
 pub mod protocol;
+pub mod relay_crypto;
 pub mod server;
 pub mod state;
 pub mod tls;

@@ -19,6 +19,7 @@ use axum::routing::get;
 use axum::Router;
 use clipsync_core::auth::{GroupAuthorizer, GroupId, RelayEnvelope, ReplayProtector, SessionId};
 use clipsync_core::protocol::{DeviceId, Message, PROTOCOL_VERSION};
+use clipsync_core::relay_crypto::EncryptedRelayPayload;
 use futures::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -46,7 +47,25 @@ struct WireEnvelope {
     destination: Option<DeviceId>,
     group: GroupId,
     sequence: u64,
-    payload: Message,
+    payload: EncryptedRelayPayload,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OutboundEnvelope {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    session_id: SessionId,
+    source: DeviceId,
+    destination: Option<DeviceId>,
+    group: GroupId,
+    sequence: u64,
+    payload: EncryptedRelayPayload,
+}
+
+#[derive(Debug, Clone)]
+enum Outbound {
+    Message(Message),
+    Envelope(OutboundEnvelope),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -188,7 +207,7 @@ impl RelayConfig {
 struct Session {
     identity: RelayIdentity,
     session_id: String,
-    tx: mpsc::Sender<Arc<Message>>,
+    tx: mpsc::Sender<Arc<Outbound>>,
 }
 
 #[derive(Debug)]
@@ -293,7 +312,11 @@ impl RelayState {
 }
 
 impl RelayState {
-    pub async fn attach(&self, identity: RelayIdentity, tx: mpsc::Sender<Arc<Message>>) -> String {
+    pub(crate) async fn attach(
+        &self,
+        identity: RelayIdentity,
+        tx: mpsc::Sender<Arc<Outbound>>,
+    ) -> String {
         let session_id = SessionId::new();
         let identity = RelayIdentity {
             session_id: session_id.clone(),
@@ -380,8 +403,8 @@ impl RelayState {
         destination: Option<&DeviceId>,
         message: Message,
     ) -> usize {
-        let message = Arc::new(message.with_origin(source));
-        let sessions: Vec<(String, mpsc::Sender<Arc<Message>>)> = self
+        let message = Arc::new(Outbound::Message(message.with_origin(source)));
+        let sessions: Vec<(String, mpsc::Sender<Arc<Outbound>>)> = self
             .sessions
             .read()
             .await
@@ -416,6 +439,67 @@ impl RelayState {
             }
         }
         delivered
+    }
+
+    async fn route_encrypted(
+        &self,
+        envelope: OutboundEnvelope,
+        authenticated_source: &DeviceId,
+    ) -> Result<usize, String> {
+        let active = self
+            .sessions
+            .read()
+            .await
+            .get(envelope.session_id.as_str())
+            .is_some_and(|session| {
+                session.identity.device_id == *authenticated_source
+                    && session.identity.session_id == envelope.session_id
+            });
+        if !active || envelope.source != *authenticated_source {
+            return Err("authorization rejected: inactive or forged session".into());
+        }
+        self.groups
+            .authorize(
+                &envelope.source,
+                envelope.destination.as_ref(),
+                &envelope.group,
+            )
+            .map_err(|error| format!("authorization rejected: {error:?}"))?;
+        if !self
+            .replay
+            .lock()
+            .await
+            .accept(&envelope.session_id, envelope.sequence)
+        {
+            return Err("authorization rejected: replay".into());
+        }
+        let sessions: Vec<(String, mpsc::Sender<Arc<Outbound>>)> = self
+            .sessions
+            .read()
+            .await
+            .values()
+            .filter(|session| {
+                session.identity.group_id == envelope.group
+                    && envelope
+                        .destination
+                        .as_ref()
+                        .map_or(true, |id| session.identity.device_id == *id)
+                    && session.identity.device_id != envelope.source
+            })
+            .map(|session| (session.session_id.clone(), session.tx.clone()))
+            .collect();
+        let mut delivered = 0;
+        for (id, tx) in sessions {
+            if tx
+                .try_send(Arc::new(Outbound::Envelope(envelope.clone())))
+                .is_ok()
+            {
+                delivered += 1;
+            } else {
+                self.detach(&id).await;
+            }
+        }
+        Ok(delivered)
     }
 
     pub async fn len(&self) -> usize {
@@ -610,11 +694,14 @@ async fn connection(
     shutdown: CancellationToken,
 ) {
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<Arc<Message>>(capacity);
-    let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (tx, mut rx) = mpsc::channel::<Arc<Outbound>>(capacity);
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
-            match message.to_json() {
+            let json = match message.as_ref() {
+                Outbound::Message(message) => message.to_json(),
+                Outbound::Envelope(envelope) => serde_json::to_string(envelope),
+            };
+            match json {
                 Ok(json) => {
                     if sink.send(WsMessage::Text(json)).await.is_err() {
                         break;
@@ -624,16 +711,7 @@ async fn connection(
             }
         }
     });
-    let result = relay_loop(
-        &mut stream,
-        &state,
-        &identity,
-        &tx,
-        &sequence,
-        peer,
-        &shutdown,
-    )
-    .await;
+    let result = relay_loop(&mut stream, &state, &identity, &tx, peer, &shutdown).await;
     state.release_connection();
     writer.abort();
     if let Ok(Some(session_id)) = result {
@@ -646,8 +724,7 @@ async fn relay_loop<S>(
     stream: &mut S,
     state: &Arc<RelayState>,
     identity: &RelayIdentity,
-    own_tx: &mpsc::Sender<Arc<Message>>,
-    sequence: &Arc<std::sync::atomic::AtomicU64>,
+    own_tx: &mpsc::Sender<Arc<Outbound>>,
     peer: SocketAddr,
     shutdown: &CancellationToken,
 ) -> Result<Option<String>, ()>
@@ -678,7 +755,6 @@ where
             state,
             identity,
             own_tx,
-            sequence,
             &attached,
             peer.ip(),
         )
@@ -709,8 +785,7 @@ async fn handle_frame(
     frame: WsMessage,
     state: &Arc<RelayState>,
     identity: &RelayIdentity,
-    own_tx: &mpsc::Sender<Arc<Message>>,
-    sequence: &Arc<std::sync::atomic::AtomicU64>,
+    own_tx: &mpsc::Sender<Arc<Outbound>>,
     session_id: &SessionId,
     peer: std::net::IpAddr,
 ) -> Result<(), ()> {
@@ -730,34 +805,23 @@ async fn handle_frame(
             | Ok(Message::PairOk { .. })
             | Ok(Message::PairFail { .. }) => Err(()),
             Ok(Message::Ping { ts }) => {
-                let _ = own_tx.try_send(Arc::new(Message::Pong { ts }));
+                let _ = own_tx.try_send(Arc::new(Outbound::Message(Message::Pong { ts })));
                 Ok(())
             }
             Ok(Message::Pong { .. }) => Ok(()),
-            Ok(message) => {
-                let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                let envelope = RelayEnvelope {
-                    session_id: session_id.clone(),
-                    source: identity.device_id.clone(),
-                    destination: None,
-                    group: identity.group_id.clone(),
-                    sequence,
-                    payload: message,
-                };
-                state
-                    .route_envelope(envelope, &identity.device_id)
-                    .await
-                    .map(|_| ())
-                    .map_err(|_| ())
-            }
+            Ok(Message::ClipboardText { .. })
+            | Ok(Message::ClipboardImage { .. })
+            | Ok(Message::ClipboardHtml { .. }) => Err(()),
+            Ok(_) => Err(()),
             Err(_) => {
                 let envelope: WireEnvelope = serde_json::from_str(&text).map_err(|_| ())?;
                 if envelope.kind != "relay_envelope" || envelope.session_id != *session_id {
                     return Err(());
                 }
                 state
-                    .route_envelope(
-                        RelayEnvelope {
+                    .route_encrypted(
+                        OutboundEnvelope {
+                            kind: "relay_envelope",
                             session_id: envelope.session_id,
                             source: envelope.source,
                             destination: envelope.destination,
@@ -820,8 +884,10 @@ mod tests {
         };
         assert_eq!(state.route(&identity("account", "a"), message).await, 1);
         match &*b_rx.recv().await.unwrap() {
-            Message::ClipboardText { origin, .. } => assert_eq!(origin.as_str(), "a"),
-            other => panic!("unexpected message: {}", other.type_name()),
+            Outbound::Message(Message::ClipboardText { origin, .. }) => {
+                assert_eq!(origin.as_str(), "a")
+            }
+            other => panic!("unexpected message: {other:?}"),
         }
         state.detach(&b_id).await;
         assert_eq!(
@@ -923,7 +989,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_hello_and_clipboard_round_trip_through_relay() {
+    async fn plaintext_clipboard_is_rejected_by_relay() {
         let source = identity("account", "source");
         let target = identity("account", "target");
         let mut groups = GroupAuthorizer::default();
@@ -957,28 +1023,21 @@ mod tests {
             Ok(WsMessage::Text(serde_json::to_string(&hello).unwrap())),
             Ok(WsMessage::Text(serde_json::to_string(&clipboard).unwrap())),
         ]);
-        let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let shutdown = CancellationToken::new();
         relay_loop(
             &mut frames,
             &state,
             &source,
             &source_tx,
-            &sequence,
             "127.0.0.1:1".parse().unwrap(),
             &shutdown,
         )
         .await
         .unwrap();
-        match target_rx.recv().await.unwrap().as_ref() {
-            Message::ClipboardText {
-                origin, content, ..
-            } => {
-                assert_eq!(origin, &source.device_id);
-                assert_eq!(content, "end-to-end");
-            }
-            other => panic!("unexpected message: {}", other.type_name()),
-        }
+        assert!(
+            target_rx.try_recv().is_err(),
+            "relay não deve encaminhar clipboard em claro"
+        );
     }
     #[test]
     fn relay_config_deserializes_limits_and_derives_message_limit() {
