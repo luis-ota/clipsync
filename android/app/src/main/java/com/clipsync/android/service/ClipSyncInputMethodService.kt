@@ -10,6 +10,8 @@ import com.clipsync.android.data.Message
 
 /** A small IME action row. It only inserts text explicitly requested by the user. */
 class ClipSyncInputMethodService : InputMethodService() {
+    private var actionButton: Button? = null
+
     override fun onCreateInputView(): View {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -19,7 +21,7 @@ class ClipSyncInputMethodService : InputMethodService() {
         layout.addView(TextView(this).apply {
             text = item?.preview ?: "Nenhum clipboard recebido do PC"
         })
-        layout.addView(Button(this).apply {
+        actionButton = Button(this).apply {
             text = "Colar do PC"
             isEnabled = RemoteClipboardBuffer.get() is Message.ClipboardText
             setOnClickListener {
@@ -28,7 +30,22 @@ class ClipSyncInputMethodService : InputMethodService() {
                     currentInputConnection?.commitText(message.content, 1)
                 }
             }
-        })
+        }.also(layout::addView)
         return layout
+    }
+
+    override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        actionButton?.apply {
+            isEnabled = RemoteClipboardBuffer.get() is Message.ClipboardText
+            setOnClickListener {
+                (RemoteClipboardBuffer.get() as? Message.ClipboardText)?.let { currentInputConnection?.commitText(it.content, 1) }
+            }
+        }
+    }
+
+    override fun onFinishInputView(finishingInput: Boolean) {
+        actionButton?.setOnClickListener(null)
+        super.onFinishInputView(finishingInput)
     }
 }

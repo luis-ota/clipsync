@@ -13,6 +13,10 @@ class ClipboardPolicyTest {
         assertFalse(ImageLimits.acceptsEncodedSize(ImageLimits.MAX_WEBSOCKET_MESSAGE_BYTES + 1))
     }
 
+    @Test fun `limite codificado nao sofre overflow inteiro`() {
+        assertFalse(ImageLimits.acceptsEncodedSize(Int.MAX_VALUE))
+    }
+
     @Test fun `anti eco suporta escritas consecutivas e expira callback ausente`() {
         var now = 1_000L
         val echoes = PendingEchoes(ttlMillis = 100, clock = { now })

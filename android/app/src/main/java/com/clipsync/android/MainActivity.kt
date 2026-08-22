@@ -157,7 +157,11 @@ private fun RemoteEndpointForm() {
 private object RemoteEndpointStoreHolder {
     private var store: DeviceStore? = null
     fun initialize(context: android.content.Context) { store = DeviceStore(context) }
-    fun save(endpoint: DiscoveredServer) { store?.saveEndpoints(AppRepository.state.value.servers.filter(DiscoveredServer::remote) + endpoint) }
+    fun save(endpoint: DiscoveredServer) {
+        store?.saveEndpoints(
+            AppRepository.state.value.servers.filter { it.remote && it.id != endpoint.id } + endpoint,
+        )
+    }
     fun saveToken(reference: String, token: String) { store?.saveRelayToken(reference, token) }
     fun saveKey(reference: String, key: String) { store?.saveRelayKey(reference, key) }
 }
