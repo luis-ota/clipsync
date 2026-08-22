@@ -85,7 +85,8 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     // mDNS announce
     let discovery = Discovery::new()?;
     let port = server_config.port();
-    if let Err(e) = discovery.announce(&server_config.name, port) {
+    let daemon_id = server_config.device_id.clone();
+    if let Err(e) = discovery.announce(&server_config.name, port, &daemon_id) {
         warn!(error = %e, "falha anunciando serviço mDNS");
     }
 
@@ -93,7 +94,6 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     // `origin` é o device_id persistido do daemon (estável por sessão),
     // nunca um UUID novo por frame: o dedup last_origin+last_seq dos
     // clients só funciona com origin estável.
-    let daemon_id = server_config.device_id.clone().unwrap_or_default();
     let clipboard_cfg = server_config.clipboard.clone();
     let watcher_rx = clipboard.watch(Duration::from_millis(clipboard_cfg.poll_interval_ms));
     let state_watcher = state.clone();

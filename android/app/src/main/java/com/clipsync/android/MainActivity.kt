@@ -120,7 +120,7 @@ private fun StatusCard(state: AppUiState) {
 @Composable
 private fun ServerRow(server: DiscoveredServer, selected: Boolean) {
     Card(
-        modifier = Modifier.fillMaxWidth().clickable { AppRepository.select(server) },
+        modifier = Modifier.fillMaxWidth().clickable { AppRepository.select(server.id) },
         colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFFDDECE6) else MaterialTheme.colorScheme.surface),
     ) {
         Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween) {

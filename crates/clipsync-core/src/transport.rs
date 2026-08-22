@@ -144,6 +144,7 @@ impl ConnectionInner {
             session.attach(id.clone(), name.clone()).await;
             session.send(Message::PairOk {
                 device_id: id,
+                server_id: Some(self.config.device_id.clone()),
                 session_id: session.session_id().to_owned(),
                 server_name: self.config.name.clone(),
                 capabilities: self.state_caps(&device_info),
@@ -258,6 +259,7 @@ impl ConnectionInner {
                                     session.attach(id.clone(), device_name).await;
                                     session.send(Message::PairOk {
                                         device_id: id,
+                                        server_id: Some(self.config.device_id.clone()),
                                         session_id: session.session_id().to_owned(),
                                         server_name: self.config.name.clone(),
                                         capabilities: self.state_caps(device_info),

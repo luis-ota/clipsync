@@ -138,11 +138,13 @@ async fn full_handshake_and_clipboard_roundtrip() {
         let (device_id, server_name) = match recv_message(&mut ws).await {
             Message::PairOk {
                 device_id,
+                server_id,
                 session_id,
                 server_name,
                 capabilities,
             } => {
                 assert!(!session_id.is_empty(), "session_id presente");
+                assert_eq!(server_id, Some(state.config.device_id.clone()));
                 assert!(capabilities.text, "text habilitado no pareamento");
                 (device_id, server_name)
             }
@@ -350,11 +352,13 @@ async fn pair_new_client(ws: &mut WsStream, state: &std::sync::Arc<ServerState>)
     match recv_message(ws).await {
         Message::PairOk {
             device_id,
+            server_id,
             session_id,
             server_name,
             capabilities,
         } => {
             assert!(!session_id.is_empty(), "session_id presente");
+            assert_eq!(server_id, Some(state.config.device_id.clone()));
             assert_eq!(server_name, "linux-desktop");
             assert!(capabilities.text, "text habilitado no pareamento");
             assert!(
@@ -633,6 +637,7 @@ async fn trusted_device_skips_pairing() {
         match recv_message(&mut ws2).await {
             Message::PairOk {
                 device_id: did,
+                server_id: _,
                 session_id,
                 server_name,
                 capabilities,

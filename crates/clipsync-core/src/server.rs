@@ -35,7 +35,7 @@ pub struct ServerConfig {
     pub security: crate::config::SecurityConfig,
     /// ID próprio do daemon (persistido no TOML). Usado como
     /// `origin` estável no anti-eco do watcher.
-    pub device_id: Option<DeviceId>,
+    pub device_id: DeviceId,
 }
 
 impl ServerConfig {
@@ -45,7 +45,7 @@ impl ServerConfig {
             name: cfg.name.clone(),
             clipboard: cfg.clipboard.clone(),
             security: cfg.security.clone(),
-            device_id: cfg.device_id.clone(),
+            device_id: cfg.device_id.clone().unwrap_or_default(),
         }
     }
 
@@ -66,7 +66,7 @@ impl Default for ServerConfig {
             name: DEFAULT_NAME.into(),
             clipboard: crate::config::ClipboardConfig::default(),
             security: crate::config::SecurityConfig::default(),
-            device_id: None,
+            device_id: DeviceId::new(),
         }
     }
 }

@@ -145,6 +145,7 @@ async fn run(cli: Cli) {
     let device_id = match recv(&mut ws).await {
         Ok(Message::PairOk {
             device_id,
+            server_id: _,
             session_id,
             server_name,
             capabilities,

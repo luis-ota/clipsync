@@ -39,6 +39,7 @@ CLIENT                            SERVER
   │  ── se id é confiado ──>        │
   │        {"type":"pair_ok",       │
   │         "device_id":"…",        │
+  │         "server_id":"…",        │
   │         "session_id":"…",       │
   │         "server_name":"luis"}   │
   │<────────────────────────────────│
@@ -61,6 +62,7 @@ CLIENT                            SERVER
   │                                 │
   │        {"type":"pair_ok",       │
   │         "device_id":"uuid",     │
+  │         "server_id":"uuid",     │
   │         "session_id":"uuid",    │
   │         "server_name":"luis"}   │
   │<────────────────────────────────│
@@ -90,10 +92,12 @@ CLIENT                            SERVER
 5. `pair_submit` com PIN correto (digitado) + `challenge_id` + nonce
    corretos → `pair_ok`. PIN errado → `pair_fail` e o servidor fecha a
    conexão.
-6. O `device_id` recebido em `pair_ok` **deve** ser persistido pelo
-   client (SharedPreferences) e enviado em `hello` nas próximas
-   conexões.
-7. Se um `device_id` já tem uma sessão ativa e reconecta, a **nova**
+5. O `device_id` recebido em `pair_ok` **deve** ser persistido pelo
+   client sob a chave `server_id` e enviado em `hello` somente nas próximas
+   conexões com esse servidor. `server_id` é a identidade persistida do daemon,
+   também anunciada por mDNS; host, porta e nome nunca são chaves de confiança.
+   Clients antigos podem ignorar o novo campo sem quebrar a decodificação.
+6. Se um `device_id` já tem uma sessão ativa e reconecta, a **nova**
    sessão substitui a antiga. A sessão antiga recebe `error` com
    código `superseded` e para de receber broadcasts; o client deve
    fechar a conexão ao recebê-lo.
@@ -138,7 +142,10 @@ no campo `data_b64`:
 }
 ```
 
-Limite v0.1: 25 MB por imagem (configurável em `max_image_bytes`).
+O daemon aceita até 25 MiB (configurável em `max_image_bytes`). Clients que
+usam OkHttp e JSON/base64 devem aplicar o menor limite end-to-end: o Android
+reserva 8 KiB para o envelope e limita os bytes crus a 12 MiB menos essa
+reserva codificada, mantendo cada mensagem abaixo da fila de 16 MiB do OkHttp.
 > Planejado v0.3: transferência via frames binários WebSocket com
 > hash + id de transferência, evitando base64 para arquivos grandes.
 
@@ -210,6 +217,7 @@ Campos TXT:
 | Chave        | Valor                       |
 |--------------|-----------------------------|
 | `name`       | Nome amigável do PC         |
+| `server_id`  | UUID estável do daemon       |
 | `protocol`   | `v1`                        |
 | `port`       | Porta do websocket          |
 | `host`       | IP do daemon                |

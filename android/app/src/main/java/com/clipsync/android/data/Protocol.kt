@@ -39,6 +39,7 @@ sealed interface Message {
         val session_id: String,
         val server_name: String,
         val capabilities: Capabilities = Capabilities(),
+        val server_id: String? = null,
     ) : Message
     @Serializable @SerialName("pair_fail")
     data class PairFail(val reason: String, val message: String) : Message
