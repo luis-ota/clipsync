@@ -37,6 +37,7 @@ class WebSocketClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .pingInterval(30, TimeUnit.SECONDS).readTimeout(0, TimeUnit.MILLISECONDS).build(),
     private val policy: ReconnectPolicy = ReconnectPolicy(),
+    private val credentialProvider: (String) -> String? = { null },
 ) {
     interface Callbacks {
         fun onConnecting(generation: Long, delayMillis: Long?)
@@ -134,11 +135,20 @@ class WebSocketClient(
         val server = target ?: return
         val connectionGeneration = generation
         callbacks.onConnecting(connectionGeneration, null)
-        if (!server.tls || server.tlsFingerprint.isNullOrBlank()) {
+        if (!server.tls || !isFingerprint(server.tlsFingerprint)) {
             callbacks.onDisconnected(connectionGeneration, "servidor sem TLS/pinning; compatibilidade insegura desabilitada")
             return
         }
-        val request = Request.Builder().url("wss://${server.host}:${server.port}/ws").build()
+        val requestBuilder = Request.Builder().url("wss://${server.host}:${server.port}/ws")
+        if (server.remote) {
+            val token = server.credentialRef?.let(credentialProvider)
+            if (token.isNullOrBlank()) {
+                callbacks.onDisconnected(connectionGeneration, "credencial relay ausente")
+                return
+            }
+            requestBuilder.header("Authorization", "Bearer $token")
+        }
+        val request = requestBuilder.build()
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 events.trySend(Event.Opened(connectionGeneration, webSocket))
@@ -153,16 +163,16 @@ class WebSocketClient(
                 events.trySend(Event.Failed(connectionGeneration, webSocket, t.message ?: "falha de rede"))
             }
         }
-        socket = pinnedClient(server.tlsFingerprint).newWebSocket(request, listener)
+        socket = pinnedClient(server.tlsFingerprint!!).newWebSocket(request, listener)
     }
 
     private fun pinnedClient(expected: String): OkHttpClient {
-        val normalized = expected.filter { it.isDigit() || it.lowercaseChar() in 'a'..'f' }.lowercase()
+        val normalized = expected.lowercase()
         val trustManager = object : X509TrustManager {
             override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) = Unit
             override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
-                if (chain.isEmpty() || !chain.any { sha256(it.encoded) == normalized })
+                if (chain.isEmpty() || sha256(chain[0].encoded) != normalized)
                     throw java.security.cert.CertificateException("fingerprint TLS não corresponde ao mDNS")
             }
         }
@@ -175,6 +185,8 @@ class WebSocketClient(
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
         .joinToString("") { "%02x".format(it) }
+
+    private fun isFingerprint(value: String?): Boolean = value?.matches(Regex("[0-9a-fA-F]{64}")) == true
 
     private fun fail(failedSocket: WebSocket, reason: String) {
         if (failedSocket !== socket || target == null || reconnectJob?.isActive == true) return

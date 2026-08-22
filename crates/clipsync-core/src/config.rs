@@ -76,8 +76,9 @@ impl Default for Config {
     }
 }
 
-/// Destino WebSocket configurado para um cliente Linux. O segredo nunca é
-/// armazenado aqui: `credential_ref` aponta para um provedor externo.
+/// Metadados de destino exportáveis para um cliente. O daemon Linux não usa
+/// esta lista para abrir conexões de saída; `credential_ref` é uma referência
+/// opaca para o consumidor que implementa a conexão.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EndpointConfig {
     pub name: String,

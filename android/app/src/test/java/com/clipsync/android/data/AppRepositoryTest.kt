@@ -29,11 +29,11 @@ class AppRepositoryTest {
 
     @Test fun `endpoint remoto permanece como fallback quando LAN muda`() {
         AppRepository.setRemoteEndpoints(emptyList())
-        val relay = DiscoveredServer("relay", "relay-1", "relay", "relay.example", 8765, true, "a".repeat(64), true)
+        val relay = DiscoveredServer("relay", null, "relay", "relay.example", 8765, true, "a".repeat(64), "relay-token", true)
         AppRepository.setRemoteEndpoints(listOf(relay))
         AppRepository.setServers(DiscoverySnapshot(200, listOf(server("lan-1", "192.168.1.9"))))
-        assertEquals(setOf("lan-1", "relay-1"), AppRepository.state.value.servers.map { it.id }.toSet())
-        AppRepository.select("relay-1")
+        assertEquals(setOf("lan-1", "legacy:relay"), AppRepository.state.value.servers.map { it.id }.toSet())
+        AppRepository.select("legacy:relay")
         AppRepository.setServers(DiscoverySnapshot(201, emptyList()))
         assertEquals("relay.example", AppRepository.targets.value?.host)
     }
