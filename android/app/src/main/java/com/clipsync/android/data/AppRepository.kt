@@ -14,9 +14,27 @@ data class DiscoveredServer(
     val port: Int,
     val tls: Boolean = true,
     val tlsFingerprint: String? = null,
+    val credentialRef: String? = null,
     val remote: Boolean = false,
 ) {
     val id: String get() = serverId ?: "legacy:$serviceName"
+}
+enum class RouteKind { LAN, RELAY }
+
+class RouteStateMachine(private val routes: List<DiscoveredServer>) {
+    private var index = 0
+    fun current(): DiscoveredServer? = routes.getOrNull(index)
+    fun failover(): DiscoveredServer? {
+        if (routes.isEmpty()) return null
+        val currentKind = kind()
+        val next = (1..routes.size).firstOrNull { offset ->
+            val candidate = routes[(index + offset) % routes.size]
+            candidate.remote != (currentKind == RouteKind.RELAY)
+        } ?: 1
+        index = (index + next) % routes.size
+        return current()
+    }
+    fun kind(): RouteKind? = current()?.let { if (it.remote) RouteKind.RELAY else RouteKind.LAN }
 }
 data class DiscoverySnapshot(val epoch: Long, val servers: List<DiscoveredServer>)
 enum class ConnectionStatus { DISCOVERING, CONNECTING, AUTHENTICATING, WAITING_FOR_PIN, CONNECTED, DISCONNECTED, ERROR }
@@ -38,6 +56,7 @@ object AppRepository {
 
     private var discoveryEpoch = -1L
     private val remoteServers = linkedMapOf<String, DiscoveredServer>()
+    private var routeMachine = RouteStateMachine(emptyList())
 
     fun setRemoteEndpoints(endpoints: List<DiscoveredServer>) {
         remoteServers.clear()
@@ -56,6 +75,7 @@ object AppRepository {
         val servers = (snapshot.servers + remoteServers.values)
             .distinctBy(DiscoveredServer::id).sortedBy(DiscoveredServer::name)
         mutableState.update { it.copy(servers = servers) }
+        routeMachine = RouteStateMachine(servers)
         mutableTargets.value = servers.firstOrNull { it.id == mutableState.value.selectedServerId }
     }
     fun select(serverId: String) {
@@ -66,11 +86,19 @@ object AppRepository {
     fun updateStatus(status: ConnectionStatus, detail: String, expiresAt: Long? = null) {
         mutableState.update { it.copy(status = status, statusDetail = detail, pinExpiresAt = expiresAt) }
     }
+    fun alternateTarget(current: DiscoveredServer): DiscoveredServer? {
+        val routes = mutableState.value.servers
+        if (routeMachine.current()?.id != current.id) {
+            routeMachine = RouteStateMachine(listOf(current) + routes.filter { it.id != current.id })
+        }
+        return routeMachine.failover()
+    }
 
     private fun publishServers() {
         val servers = (mutableState.value.servers.filterNot(DiscoveredServer::remote) + remoteServers.values)
             .distinctBy(DiscoveredServer::id).sortedBy(DiscoveredServer::name)
         mutableState.update { it.copy(servers = servers) }
+        routeMachine = RouteStateMachine(servers)
         mutableTargets.value = servers.firstOrNull { it.id == mutableState.value.selectedServerId }
     }
 }

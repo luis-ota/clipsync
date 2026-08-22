@@ -109,20 +109,24 @@ private fun RemoteEndpointForm() {
     var name by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
     var fingerprint by remember { mutableStateOf("") }
+    var token by remember { mutableStateOf("") }
     Column {
         Text("Adicionar relay ou endpoint remoto", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Nome") }, singleLine = true)
         OutlinedTextField(url, { url = it }, Modifier.fillMaxWidth(), label = { Text("URL wss://host:porta/ws") }, singleLine = true)
         OutlinedTextField(fingerprint, { fingerprint = it.filter(Char::isLetterOrDigit).lowercase().take(64) }, Modifier.fillMaxWidth(), label = { Text("Fingerprint SHA-256 (64 hex)") }, singleLine = true)
+        OutlinedTextField(token, { token = it }, Modifier.fillMaxWidth(), label = { Text("Bearer token do relay") }, singleLine = true)
         Button(onClick = {
             val parsed = runCatching { URI(url) }.getOrNull()
             if (parsed?.scheme == "wss" && parsed.path == "/ws" && parsed.host != null && parsed.port > 0 && fingerprint.length == 64) {
-                val endpoint = DiscoveredServer("remote:$name", name, name, parsed.host, parsed.port, true, fingerprint, true)
+                val reference = "remote:$name"
+                val endpoint = DiscoveredServer(reference, null, name, parsed.host, parsed.port, true, fingerprint, reference, true)
                 AppRepository.addRemoteEndpoint(endpoint)
                 RemoteEndpointStoreHolder.save(endpoint)
+                RemoteEndpointStoreHolder.saveToken(reference, token)
                 name = ""; url = ""; fingerprint = ""
             }
-        }, enabled = name.isNotBlank() && url.isNotBlank() && fingerprint.length == 64, modifier = Modifier.fillMaxWidth()) { Text("Salvar endpoint") }
+        }, enabled = name.isNotBlank() && url.isNotBlank() && fingerprint.length == 64 && token.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Salvar endpoint") }
     }
 }
 
@@ -130,6 +134,7 @@ private object RemoteEndpointStoreHolder {
     private var store: DeviceStore? = null
     fun initialize(context: android.content.Context) { store = DeviceStore(context) }
     fun save(endpoint: DiscoveredServer) { store?.saveEndpoints(AppRepository.state.value.servers.filter(DiscoveredServer::remote) + endpoint) }
+    fun saveToken(reference: String, token: String) { store?.saveRelayToken(reference, token) }
 }
 
 @Composable

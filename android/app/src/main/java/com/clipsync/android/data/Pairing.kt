@@ -27,6 +27,8 @@ class DeviceStore(context: Context) {
 
     fun loadEndpoints(): List<DiscoveredServer> = SecureEndpointStore(preferences).load()
     fun saveEndpoints(endpoints: List<DiscoveredServer>) = SecureEndpointStore(preferences).save(endpoints)
+    fun saveRelayToken(reference: String, token: String) = SecureEndpointStore(preferences).saveToken(reference, token)
+    fun relayToken(reference: String): String? = SecureEndpointStore(preferences).loadToken(reference)
 
     private companion object { const val LEGACY_KEY = "device_id" }
 }
@@ -37,13 +39,21 @@ private class SecureEndpointStore(private val preferences: android.content.Share
         val encoded = preferences.getString(ENDPOINTS_KEY, null) ?: return emptyList()
         decrypt(encoded).split('\n').filter { it.isNotBlank() }.mapNotNull { line ->
             val fields = line.split('|')
-            if (fields.size != 6) null else DiscoveredServer(fields[0], fields[1], fields[0], fields[2], fields[3].toInt(), fields[4] == "tls", fields[5].ifBlank { null }, true)
+            if (fields.size != 7) null else DiscoveredServer(fields[0], fields[1].ifBlank { null }, fields[0], fields[2], fields[3].toInt(), fields[4] == "tls", fields[5].ifBlank { null }, fields[6].ifBlank { null }, true)
         }
     }.getOrDefault(emptyList())
 
     fun save(endpoints: List<DiscoveredServer>) {
-        val value = endpoints.joinToString("\n") { listOf(it.serviceName, it.id, it.host, it.port.toString(), if (it.tls) "tls" else "plain", it.tlsFingerprint.orEmpty()).joinToString("|") }
+        val value = endpoints.joinToString("\n") { listOf(it.serviceName, it.serverId.orEmpty(), it.host, it.port.toString(), if (it.tls) "tls" else "plain", it.tlsFingerprint.orEmpty(), it.credentialRef.orEmpty()).joinToString("|") }
         preferences.edit().putString(ENDPOINTS_KEY, encrypt(value)).apply()
+    }
+
+    fun saveToken(reference: String, token: String) {
+        preferences.edit().putString("relay_token.$reference", encrypt(token)).apply()
+    }
+
+    fun loadToken(reference: String): String? = preferences.getString("relay_token.$reference", null)?.let {
+        runCatching { decrypt(it) }.getOrNull()
     }
 
     private fun key(): SecretKey {

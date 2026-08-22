@@ -62,7 +62,7 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
         startForeground(NOTIFICATION_ID, notification("Iniciando descoberta"))
         deviceStore = DeviceStore(this)
         AppRepository.setRemoteEndpoints(deviceStore.loadEndpoints())
-        webSocket = WebSocketClient(this)
+        webSocket = WebSocketClient(this, credentialProvider = { ref -> deviceStore.relayToken(ref) })
         clipboard = ClipboardWatcher(this, scope, { currentDeviceId }, ::sendClipboard).also { it.start() }
         discovery = NsdDiscovery(this) { snapshot ->
             scope.launch {
@@ -129,7 +129,11 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
             app_version = "clipsync-android ${BuildConfig.VERSION_NAME}",
         ))
         send(engine!!.onOpen())
-        setStatus(ConnectionStatus.AUTHENTICATING, "Autenticando dispositivo")
+        if (selectedServer?.remote == true) {
+            setStatus(ConnectionStatus.CONNECTED, "Conectado ao relay")
+        } else {
+            setStatus(ConnectionStatus.AUTHENTICATING, "Autenticando dispositivo")
+        }
     }
     override fun onMessage(generation: Long, payload: String) {
         incomingMessages.trySend(generation to payload)
@@ -147,6 +151,9 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
         if (!sessions.accepts(generation)) return
         engine = null
         setStatus(ConnectionStatus.DISCONNECTED, reason)
+        selectedServer?.let { current ->
+            AppRepository.alternateTarget(current)?.let { fallback -> AppRepository.select(fallback.id) }
+        }
     }
     private fun handleAction(action: ProtocolAction) {
         when (action) {
@@ -166,9 +173,8 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
                 }
                 // A instância mDNS é a chave de compatibilidade para servidores
                 // antigos que ainda não anunciam nem retornam server_id.
-                val serverId = protocolId ?: discoveredId ?: selectedServer?.id
-                if (serverId == null) return
-                deviceStore.save(serverId, action.result.device_id)
+                val serverId = protocolId ?: discoveredId
+                if (serverId != null) deviceStore.save(serverId, action.result.device_id)
                 currentDeviceId = action.result.device_id
                 setStatus(ConnectionStatus.CONNECTED, "Conectado a ${action.result.server_name}")
             }

@@ -67,7 +67,8 @@ enum Commands {
         #[arg(long, value_name = "PATH")]
         config: Option<std::path::PathBuf>,
     },
-    /// Gerencia endpoints de clientes LAN/relay. Tokens ficam fora do TOML.
+    /// Gerencia configuração de endpoints para clientes externos. O daemon
+    /// Linux não abre conexões de saída nem afirma conexão relay.
     Endpoints {
         #[command(subcommand)]
         command: EndpointCommands,
