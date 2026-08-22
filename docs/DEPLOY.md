@@ -74,6 +74,15 @@ arquivo `/etc/clipsync/relay.env` deve conter apenas
 O unit não usa `clipsyncd service-install`: esse comando gera um unit de sessão
 do desktop e não é apropriado para um relay headless.
 
+## Cliente Linux outbound
+
+O mesmo `clipsyncd` pode manter uma conexão de saída para uma máquina LAN ou
+para `/ws` de um relay. Use `clipsyncd endpoints add ... --scope lan|relay`.
+Relays exigem `--tls-fingerprint` e `--credential-ref`; o último aponta para
+uma variável de ambiente ou `file:` com modo `0600`. Configure
+`[security].outbound_route` como `lan`, `relay` ou `auto`. A seleção `auto`
+tenta LAN antes de relay e reconecta após falhas.
+
 ## Docker Compose
 
 ```bash

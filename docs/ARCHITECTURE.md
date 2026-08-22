@@ -97,6 +97,7 @@ clipsyncd show-pin        # orienta como consultar o PIN no daemon/tray
 clipsyncd list-peers      # lista devices confiados
 clipsyncd untrust <id>    # remove um device (com o daemon parado)
 clipsyncd show-address    # mostra IP:porta para o app
+clipsyncd endpoints list|test|remove
 clipsyncd service-install # instala unit systemd de usuário
 clipsyncd service-uninstall
 ```
@@ -123,8 +124,8 @@ pairing_timeout_secs = 120
 
 - `cargo test --workspace` — 22 testes (protocolo, pairing, state,
   healthz, broadcast).
-- CI (`.github/workflows/ci.yml`): `fmt` + `clippy -D warnings` +
-  `build` + `test` no Ubuntu.
+ - CI (`.github/workflows/ci.yml`): `fmt` + `clippy -D warnings` + `test` em
+  Debian, Ubuntu, Fedora e Arch, sem exigir GUI.
 
 ## Roadmap
 

@@ -24,7 +24,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 axum = "0.7"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+url = "2"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 hyper = "1"
