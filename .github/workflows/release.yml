@@ -2,12 +2,11 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.1.1"
+        description: "Release tag, for example v0.1.2"
         required: true
         type: string
 
@@ -20,7 +19,6 @@ env:
 
 jobs:
   metadata:
-    name: release-metadata
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
@@ -33,34 +31,26 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           tag="${INPUT_TAG:-$PUSH_TAG}"
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "invalid release tag: $tag" >&2
-            exit 1
-          }
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid tag: $tag" >&2; exit 1; }
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
   linux:
-    name: linux-release
     needs: metadata
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt,clippy
       - name: Install packaging tools
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev rpm
-      - name: Validate and build Linux release artifacts
+      - name: Build Linux artifacts
         env:
           CLIPSYNC_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           cargo test --workspace --no-fail-fast
           packaging/build-release.sh "$RUNNER_TEMP/clipsync-dist"
-          sed "s/^pkgver=.*/pkgver=${{ needs.metadata.outputs.version }}/" \
-            packaging/PKGBUILD > "$RUNNER_TEMP/clipsync-dist/PKGBUILD"
-          cp packaging/flatpak/org.clipsync.Clipsyncd.yml \
-            "$RUNNER_TEMP/clipsync-dist/org.clipsync.Clipsyncd.yml"
+          sed "s/^pkgver=.*/pkgver=${CLIPSYNC_VERSION}/" packaging/PKGBUILD > "$RUNNER_TEMP/clipsync-dist/PKGBUILD"
+          cp packaging/flatpak/org.clipsync.Clipsyncd.yml "$RUNNER_TEMP/clipsync-dist/org.clipsync.Clipsyncd.yml"
           packaging/smoke-test.sh "$RUNNER_TEMP/clipsync-dist"
       - uses: actions/upload-artifact@v4
         with:
@@ -69,7 +59,6 @@ jobs:
           if-no-files-found: error
 
   android:
-    name: android-release
     needs: metadata
     runs-on: ubuntu-latest
     defaults:
@@ -83,14 +72,12 @@ jobs:
           java-version: 17
       - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
-      - name: Install Android SDK
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      - name: Test and build installable APK
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Build installable APK
         run: |
           ./gradlew test lint assembleDebug -PversionName=${{ needs.metadata.outputs.version }}
           mkdir -p "$RUNNER_TEMP/clipsync-dist"
-          cp app/build/outputs/apk/debug/app-debug.apk \
-            "$RUNNER_TEMP/clipsync-dist/clipsync-android-${{ needs.metadata.outputs.version }}-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/clipsync-dist/clipsync-android-${{ needs.metadata.outputs.version }}-debug.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: clipsync-android-${{ needs.metadata.outputs.version }}
@@ -98,7 +85,6 @@ jobs:
           if-no-files-found: error
 
   desktop:
-    name: desktop-${{ matrix.os }}
     needs: metadata
     runs-on: ${{ matrix.os }}
     strategy:
@@ -114,14 +100,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build desktop client
-        run: cargo build --locked --release -p clipsync-client
-      - name: Stage desktop artifact
+      - run: cargo build --locked --release -p clipsync-client
+      - name: Stage desktop binary
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/clipsync-dist"
-          cp "target/release/${{ matrix.binary }}" \
-            "$RUNNER_TEMP/clipsync-dist/clipsync-${{ matrix.suffix }}-${{ needs.metadata.outputs.version }}${{ matrix.suffix == 'windows' && '.exe' || '' }}"
+          cp "target/release/${{ matrix.binary }}" "$RUNNER_TEMP/clipsync-dist/clipsync-${{ matrix.suffix }}-${{ needs.metadata.outputs.version }}${{ matrix.suffix == 'windows' && '.exe' || '' }}"
       - uses: actions/upload-artifact@v4
         with:
           name: clipsync-${{ matrix.suffix }}-${{ needs.metadata.outputs.version }}
@@ -129,7 +113,6 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: publish-github-release
     needs: [metadata, linux, android, desktop]
     runs-on: ubuntu-latest
     steps:
@@ -138,13 +121,34 @@ jobs:
           pattern: clipsync-*
           path: release-assets
           merge-multiple: true
-      - name: Publish release and checksums
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.metadata.outputs.tag }}
         run: |
           find release-assets -type f -print0 | sort -z | xargs -0 sha256sum > release-assets/SHA256SUMS
-          gh release create "$TAG" release-assets/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "clipsync $TAG" \
-            --generate-notes
+          cat > release-notes.md <<EOF
+          ## clipsync ${TAG}
+
+          Instalable release for Android, Linux, macOS and Windows.
+
+          ### Downloads
+
+          - Android: \`clipsync-android-*-debug.apk\`
+          - Debian/Ubuntu: \`clipsync_*_amd64.deb\`
+          - Fedora/RHEL: \`clipsync-*.x86_64.rpm\`
+          - Portable Linux: \`clipsync-*-linux-x86_64.tar.gz\`
+          - macOS: \`clipsync-macos-*\`
+          - Windows: \`clipsync-windows-*.exe\`
+          - Arch/Flatpak: \`PKGBUILD\` and Flatpak manifest
+          - Integrity: \`SHA256SUMS\`
+
+          ### Quick install on Linux
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/luis-ota/clipsync/main/install.sh | sh
+          \`\`\`
+
+          The installer verifies SHA-256 and installs binaries into \`~/.local/bin\`.
+          EOF
+          gh release create "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --title "clipsync $TAG" --notes-file release-notes.md
