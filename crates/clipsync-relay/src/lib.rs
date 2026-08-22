@@ -714,6 +714,14 @@ async fn handle_frame(
     session_id: &SessionId,
     peer: std::net::IpAddr,
 ) -> Result<(), ()> {
+    let frame_bytes = match &frame {
+        WsMessage::Text(text) => text.len(),
+        WsMessage::Binary(bytes) | WsMessage::Ping(bytes) | WsMessage::Pong(bytes) => bytes.len(),
+        WsMessage::Close(_) => 0,
+    };
+    if !state.allow_message(peer, frame_bytes).await {
+        return Err(());
+    }
     match frame {
         WsMessage::Text(text) => match serde_json::from_str::<Message>(&text) {
             Ok(Message::Hello { .. }) => Err(()),
@@ -727,9 +735,6 @@ async fn handle_frame(
             }
             Ok(Message::Pong { .. }) => Ok(()),
             Ok(message) => {
-                if !state.allow_message(peer, text.len()).await {
-                    return Err(());
-                }
                 let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 let envelope = RelayEnvelope {
                     session_id: session_id.clone(),
