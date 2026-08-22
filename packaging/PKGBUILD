@@ -1,0 +1,26 @@
+pkgname=clipsync
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Secure clipboard synchronization daemon and TLS relay'
+arch=('x86_64')
+url='https://github.com/luis-ota/clipsync'
+license=('Apache' 'MIT')
+depends=('systemd')
+source=("clipsync-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${srcdir}/clipsync-${pkgver}"
+  cargo build --locked --release -p clipsyncd -p clipsync-relay
+}
+
+package() {
+  cd "${srcdir}/clipsync-${pkgver}"
+  install -Dm755 target/release/clipsyncd "${pkgdir}/usr/bin/clipsyncd"
+  install -Dm755 target/release/clipsync-relay "${pkgdir}/usr/bin/clipsync-relay"
+  install -Dm644 deploy/systemd/clipsyncd.service "${pkgdir}/usr/lib/systemd/system/clipsyncd.service"
+  install -Dm644 deploy/config/relay.toml "${pkgdir}/etc/clipsync/config.toml"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/clipsync/README.md"
+  install -Dm644 docs/DEPLOY.md "${pkgdir}/usr/share/doc/clipsync/DEPLOY.md"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/clipsync/LICENSE"
+}

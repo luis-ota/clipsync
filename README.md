@@ -64,6 +64,10 @@ Cliente desktop: [`docs/DESKTOP-CLIENTS.md`](docs/DESKTOP-CLIENTS.md).
 
 Deploy operacional do `clipsyncd` headless: [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
+Artefatos de distribuição Linux e o smoke test de conteúdo/permissões ficam em
+[`packaging/`](packaging/). Consulte [`docs/DEPLOY.md`](docs/DEPLOY.md) para
+construir `.deb`, `.rpm`, Arch ou validar o manifesto Flatpak.
+
 ### Como funciona (clipboard bidirecional)
 
 1. **PC → Android**
