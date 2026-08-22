@@ -1,0 +1,33 @@
+app-id: org.clipsync.Clipsyncd
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: clipsyncd
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=session-bus
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --filesystem=xdg-config/clipsync:create
+modules:
+  - name: clipsync
+    buildsystem: simple
+    build-commands:
+      - cargo build --locked --release -p clipsyncd -p clipsync-relay
+      - install -Dm755 target/release/clipsyncd /app/bin/clipsyncd
+      - install -Dm755 target/release/clipsync-relay /app/bin/clipsync-relay
+    sources:
+      - type: git
+        url: https://github.com/luis-ota/clipsync.git
+        commit: 24eb20c02d6c3c15209df9f930f1ddb78d7ec857
+  - name: clipsync-metadata
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 org.clipsync.Clipsyncd.desktop /app/share/applications/org.clipsync.Clipsyncd.desktop
+      - install -Dm644 org.clipsync.Clipsyncd.metainfo.xml /app/share/metainfo/org.clipsync.Clipsyncd.metainfo.xml
+    sources:
+      - type: file
+        path: org.clipsync.Clipsyncd.desktop
+      - type: file
+        path: org.clipsync.Clipsyncd.metainfo.xml

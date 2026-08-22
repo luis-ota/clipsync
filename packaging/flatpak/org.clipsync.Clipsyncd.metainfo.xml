@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.clipsync.Clipsyncd</id>
+  <name>clipsync</name>
+  <summary>Secure clipboard synchronization</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <description><p>Synchronize clipboard content between trusted devices.</p></description>
+</component>

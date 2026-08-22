@@ -62,6 +62,36 @@ jobs:
       - name: Smoke CLI
         run: . "$HOME/.cargo/env" && cargo run -q -p clipsyncd -- --help && XDG_CONFIG_HOME="$RUNNER_TEMP/clipsync-${{ matrix.name }}" cargo run -q -p clipsyncd -- endpoints list
 
+      - name: Packaging smoke test
+        run: chmod +x packaging/*.sh && packaging/smoke-test.sh
+
+      - name: Build release artifacts available on this target
+        run: . "$HOME/.cargo/env" && packaging/build-release.sh "$RUNNER_TEMP/clipsync-dist"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clipsync-${{ matrix.name }}
+          path: ${{ runner.temp }}/clipsync-dist/*
+          if-no-files-found: error
+
+      - name: Smoke test generated package contents and permissions
+        run: packaging/smoke-test.sh "$RUNNER_TEMP/clipsync-dist"
+
+      - name: Validate Arch package metadata
+        if: matrix.name == 'arch'
+        working-directory: packaging
+        run: makepkg --printsrcinfo
+
+      - name: Validate Flatpak manifest when available
+        if: matrix.name == 'ubuntu' || matrix.name == 'debian'
+        run: |
+          if command -v flatpak-builder >/dev/null 2>&1; then
+            flatpak-builder --show-manifest packaging/flatpak/org.clipsync.Clipsyncd.yml >/dev/null
+          else
+            echo 'flatpak-builder unavailable: manifest validation deferred'
+          fi
+
   audit:
     name: audit
     runs-on: ubuntu-latest

@@ -1,23 +1,23 @@
 [Unit]
 Description=clipsync TLS relay
-Documentation=https://github.com/luis-ota/clipsync/tree/develop/docs/DEPLOY.md
+Documentation=https://github.com/luis-ota/clipsync/tree/main/docs/DEPLOY.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=clipsync
-Group=clipsync
-ExecStart=/usr/local/bin/clipsync-relay --config /etc/clipsync/config.toml
+DynamicUser=yes
+StateDirectory=clipsync
+ConfigurationDirectory=clipsync
+ExecStart=clipsync-relay --config %E/clipsync/config.toml
 Restart=on-failure
 RestartSec=5s
 Environment=RUST_LOG=clipsync_core=info,clipsync_relay=info
-EnvironmentFile=/etc/clipsync/relay.env
+EnvironmentFile=-%E/clipsync/relay.env
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/clipsync
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=true
 MemoryDenyWriteExecute=true

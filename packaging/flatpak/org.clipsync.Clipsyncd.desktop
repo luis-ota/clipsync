@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=clipsync
+Comment=Secure clipboard synchronization
+Exec=clipsyncd
+Type=Application
+Categories=Utility;Network;

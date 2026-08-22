@@ -3,6 +3,29 @@
 O processo de produção é o binário `clipsync-relay`. O daemon `clipsyncd` é um
 processo diferente, destinado ao clipboard local, e não deve ser usado neste deploy.
 
+## Pacotes Linux
+
+Os releases fornecem `.deb` para Debian/Ubuntu, `.rpm` para Fedora/RHEL, um
+`PKGBUILD` para Arch e um manifesto Flatpak em `packaging/`. O script
+`packaging/build-release.sh [diretório]` constrói os binários uma vez e gera os
+formatos cujo construtor está instalado; ele informa e pula os demais. Assim,
+um runner sem `rpmbuild` ou `dpkg-deb` não é tratado como se tivesse validado
+esse formato.
+
+```bash
+packaging/smoke-test.sh
+packaging/build-release.sh dist
+sudo apt install ./dist/clipsync_0.1.0_amd64.deb       # Debian/Ubuntu
+sudo dnf install ./dist/clipsync-0.1.0-1.*.rpm         # Fedora, se gerado
+cp dist/clipsync-0.1.0.tar.gz packaging/               # fonte para o PKGBUILD
+(cd packaging && makepkg)                              # Arch
+```
+
+Os pacotes instalam `clipsyncd`, `clipsync-relay`, configuração de exemplo,
+documentação e `clipsync-relay.service`. O unit usa `DynamicUser`,
+`StateDirectory` e `ConfigurationDirectory`; não depende de `/usr/local`, de
+um home específico ou de caminhos absolutos de instalação.
+
 ## Contrato operacional
 
 - WebSocket: `wss://HOST:8765/ws` (ou a URL publicada pelo proxy).
