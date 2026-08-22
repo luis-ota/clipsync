@@ -375,6 +375,12 @@ mod tests {
             back.clipboard.max_image_bytes,
             cfg.clipboard.max_image_bytes
         );
+        assert_eq!(back.limits.max_connections, cfg.limits.max_connections);
+        assert_eq!(
+            back.limits.messages_per_minute,
+            cfg.limits.messages_per_minute
+        );
+        assert_eq!(back.limits.bytes_per_minute, cfg.limits.bytes_per_minute);
     }
 
     #[test]

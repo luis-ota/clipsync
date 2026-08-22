@@ -53,7 +53,7 @@ jobs:
         run: cargo run -p clipsyncd -- validate-config --config deploy/config/relay.toml
 
       - name: Validate compose file
-        run: docker compose -f deploy/docker-compose.yml config --quiet
+        run: cp deploy/.env.example deploy/.env && docker compose -f deploy/docker-compose.yml config --quiet
 
   audit:
     name: audit

@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 axum = { workspace = true, features = ["ws"] }
 async-trait.workspace = true
+clap.workspace = true
 clipsync-core = { path = "../clipsync-core" }
 futures.workspace = true
 hyper.workspace = true
