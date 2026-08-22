@@ -129,6 +129,7 @@ private fun RemoteEndpointForm() {
     var url by remember { mutableStateOf("") }
     var fingerprint by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
+    var keyMaterial by remember { mutableStateOf("") }
     var deviceId by remember { mutableStateOf("") }
     Column {
         Text("Adicionar relay ou endpoint remoto", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -137,17 +138,19 @@ private fun RemoteEndpointForm() {
         OutlinedTextField(fingerprint, { fingerprint = it.filter { char -> char in "0123456789abcdefABCDEF" }.lowercase().take(64) }, Modifier.fillMaxWidth(), label = { Text("Fingerprint SHA-256 (64 hex)") }, singleLine = true)
         OutlinedTextField(deviceId, { deviceId = it.trim() }, Modifier.fillMaxWidth(), label = { Text("device_id associado ao bearer") }, singleLine = true)
         OutlinedTextField(token, { token = it }, Modifier.fillMaxWidth(), label = { Text("Bearer token do relay") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+        OutlinedTextField(keyMaterial, { keyMaterial = it }, Modifier.fillMaxWidth(), label = { Text("Chave E2E: key_id group_id hex_key") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
         Button(onClick = {
             val parsed = runCatching { URI(url) }.getOrNull()
-            if (parsed?.scheme == "wss" && parsed.path == "/ws" && parsed.host != null && parsed.port > 0 && isValidTlsFingerprint(fingerprint) && deviceId.isNotBlank()) {
+            if (parsed?.scheme == "wss" && parsed.path == "/ws" && parsed.host != null && parsed.port > 0 && isValidTlsFingerprint(fingerprint) && deviceId.isNotBlank() && keyMaterial.trim().split(Regex("\\s+")).size == 3) {
                 val reference = "remote:$name"
-                val endpoint = DiscoveredServer(reference, null, name, parsed.host, parsed.port, true, fingerprint, reference, true, deviceId)
+                val endpoint = DiscoveredServer(reference, null, name, parsed.host, parsed.port, true, fingerprint, reference, true, deviceId, reference)
                 AppRepository.addRemoteEndpoint(endpoint)
                 RemoteEndpointStoreHolder.save(endpoint)
                 RemoteEndpointStoreHolder.saveToken(reference, token)
-                name = ""; url = ""; fingerprint = ""; deviceId = ""; token = ""
+                RemoteEndpointStoreHolder.saveKey(reference, keyMaterial)
+                name = ""; url = ""; fingerprint = ""; deviceId = ""; token = ""; keyMaterial = ""
             }
-        }, enabled = name.isNotBlank() && url.isNotBlank() && isValidTlsFingerprint(fingerprint) && deviceId.isNotBlank() && token.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Salvar endpoint") }
+        }, enabled = name.isNotBlank() && url.isNotBlank() && isValidTlsFingerprint(fingerprint) && deviceId.isNotBlank() && token.isNotBlank() && keyMaterial.trim().split(Regex("\\s+")).size == 3, modifier = Modifier.fillMaxWidth()) { Text("Salvar endpoint") }
     }
 }
 
@@ -156,6 +159,7 @@ private object RemoteEndpointStoreHolder {
     fun initialize(context: android.content.Context) { store = DeviceStore(context) }
     fun save(endpoint: DiscoveredServer) { store?.saveEndpoints(AppRepository.state.value.servers.filter(DiscoveredServer::remote) + endpoint) }
     fun saveToken(reference: String, token: String) { store?.saveRelayToken(reference, token) }
+    fun saveKey(reference: String, key: String) { store?.saveRelayKey(reference, key) }
 }
 
 @Composable

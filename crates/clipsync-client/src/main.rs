@@ -14,11 +14,13 @@ use std::time::Duration;
 use arboard::{Clipboard, ImageData};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::Parser;
+use clipsync_core::auth::{GroupId, SessionId};
 use clipsync_core::clipboard::sha256_hex;
 use clipsync_core::discovery::Discovery;
 use clipsync_core::protocol::{
     Capabilities, DeviceId, DeviceInfo, DeviceKind, Message, PROTOCOL_VERSION,
 };
+use clipsync_core::relay_crypto::{load_key_ring, OutboundEnvelope, RelayHeader, RelayKeyRing};
 use futures::{SinkExt, StreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -53,6 +55,9 @@ struct Cli {
     /// Bearer token para relay. Nunca é gravado no estado local.
     #[arg(long, env = "CLIPSYNC_RELAY_TOKEN", hide_env_values = true)]
     relay_token: Option<String>,
+    /// Referência ao material `key_id group_id hex_key`, nunca a chave em URL.
+    #[arg(long, env = "CLIPSYNC_E2E_KEY_REF", hide_env_values = true)]
+    e2e_key_ref: Option<String>,
     /// Não fazer browse mDNS quando --url não for informado.
     #[arg(long)]
     no_mdns: bool,
@@ -155,9 +160,25 @@ async fn run(cli: Cli) -> Result<(), String> {
             )
             .await
             {
-                Ok(device_id) => {
+                Ok((device_id, session_id)) => {
                     delay = Duration::from_secs(1);
-                    if let Err(error) = run_clipboard(ws, device_id).await {
+                    let crypto = if cli.relay_token.is_some() {
+                        let reference = cli
+                            .e2e_key_ref
+                            .as_deref()
+                            .ok_or("relay exige CLIPSYNC_E2E_KEY_REF")?;
+                        let (ring, group) = load_key_ring(reference).map_err(|e| e.to_string())?;
+                        Some((
+                            ring,
+                            SessionId::from_string(session_id)
+                                .ok_or("session_id relay inválido")?,
+                            group,
+                            0,
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Err(error) = run_clipboard(ws, device_id, crypto).await {
                         eprintln!("conexão perdida: {error}; reconectando");
                     }
                 }
@@ -262,7 +283,7 @@ async fn handshake(
     state: &mut ClientState,
     endpoint: &str,
     fingerprint: Option<String>,
-) -> Result<DeviceId, String> {
+) -> Result<(DeviceId, String), String> {
     let known = cli
         .server_id
         .as_ref()
@@ -294,10 +315,11 @@ async fn handshake(
     )
     .await?;
     let response = receive(ws).await?;
-    let device_id = match response {
+    let (device_id, session_id) = match response {
         Message::PairOk {
             device_id,
             server_id: Some(server_id),
+            session_id,
             server_name,
             ..
         } => {
@@ -309,13 +331,14 @@ async fn handshake(
                 tls_fingerprint: fingerprint,
             });
             state.save()?;
-            device_id
+            (device_id, session_id)
         }
         Message::PairOk {
             device_id,
             server_id: None,
+            session_id,
             ..
-        } => device_id,
+        } => (device_id, session_id),
         Message::PairChallenge {
             challenge_id,
             nonce,
@@ -338,6 +361,7 @@ async fn handshake(
                 Message::PairOk {
                     device_id,
                     server_id: Some(server_id),
+                    session_id,
                     server_name,
                     ..
                 } => {
@@ -349,7 +373,7 @@ async fn handshake(
                         tls_fingerprint: fingerprint,
                     });
                     state.save()?;
-                    device_id
+                    (device_id, session_id)
                 }
                 Message::PairFail { reason, message } => {
                     return Err(format!("PIN ({reason}): {message}"))
@@ -364,13 +388,18 @@ async fn handshake(
             ))
         }
     };
-    Ok(device_id)
+    Ok((device_id, session_id))
 }
 
-async fn run_clipboard(mut ws: Ws, device_id: DeviceId) -> Result<(), String> {
+async fn run_clipboard(
+    mut ws: Ws,
+    device_id: DeviceId,
+    mut crypto: Option<(RelayKeyRing, SessionId, GroupId, u64)>,
+) -> Result<(), String> {
     let mut clipboard =
         Clipboard::new().map_err(|e| format!("clipboard nativo indisponível: {e}"))?;
     let mut last_hash = None;
+    let mut last_inbound_sequence = 0u64;
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     eprintln!("pareado como {device_id}; sincronizando texto/imagem (Ctrl+C para sair)");
     loop {
@@ -380,27 +409,27 @@ async fn run_clipboard(mut ws: Ws, device_id: DeviceId) -> Result<(), String> {
                     let hash = sha256_hex(text.as_bytes());
                     if last_hash.as_deref() != Some(hash.as_str()) {
                         last_hash = Some(hash.clone());
-                        send(&mut ws, Message::ClipboardText { mime: "text/plain;charset=utf-8".into(), content: text, origin: device_id.clone(), sha256: hash }).await?;
+                        send_wire(&mut ws, Message::ClipboardText { mime: "text/plain;charset=utf-8".into(), content: text, origin: device_id.clone(), sha256: hash }, &mut crypto, &device_id).await?;
                     }
                 } else if let Ok(image) = clipboard.get_image() {
                     let data = png_bytes(&image)?;
                     let hash = sha256_hex(&data);
                     if last_hash.as_deref() != Some(hash.as_str()) {
                         last_hash = Some(hash.clone());
-                        send(&mut ws, Message::ClipboardImage { mime: "image/png".into(), data_b64: STANDARD.encode(data), width: Some(image.width as u32), height: Some(image.height as u32), sha256: hash, origin: device_id.clone() }).await?;
+                        send_wire(&mut ws, Message::ClipboardImage { mime: "image/png".into(), data_b64: STANDARD.encode(data), width: Some(image.width as u32), height: Some(image.height as u32), sha256: hash, origin: device_id.clone() }, &mut crypto, &device_id).await?;
                     }
                 }
             }
             item = ws.next() => match item {
-                Some(Ok(WsMessage::Text(text))) => match serde_json::from_str::<Message>(&text) {
+                Some(Ok(WsMessage::Text(text))) => { check_inbound_sequence(&text, &crypto, &mut last_inbound_sequence)?; match decode_wire(&text, &crypto) {
                     Ok(Message::ClipboardText { content, sha256, .. }) => { clipboard.set_text(content).map_err(|e| e.to_string())?; last_hash = Some(sha256); }
                     Ok(Message::ClipboardImage { data_b64, sha256, width, height, .. }) => { let image = png_image(&STANDARD.decode(data_b64).map_err(|e| e.to_string())?, width, height)?; clipboard.set_image(image).map_err(|e| e.to_string())?; last_hash = Some(sha256); }
                     Ok(Message::ClipboardHtml { alt, .. }) => if let Some(text) = alt { clipboard.set_text(text).map_err(|e| e.to_string())?; }
-                    Ok(Message::Ping { ts }) => send(&mut ws, Message::Pong { ts }).await?,
+                    Ok(Message::Ping { ts }) => send_wire(&mut ws, Message::Pong { ts }, &mut crypto, &device_id).await?,
                     Ok(Message::Error { code, message }) if code == "superseded" => return Err(message),
                     Ok(_) => {}
                     Err(e) => return Err(format!("JSON inválido: {e}")),
-                },
+                } },
                 Some(Ok(WsMessage::Ping(data))) => ws.send(WsMessage::Pong(data)).await.map_err(|e| e.to_string())?,
                 Some(Ok(WsMessage::Close(_))) | None => return Ok(()),
                 Some(Ok(_)) => {}
@@ -408,6 +437,80 @@ async fn run_clipboard(mut ws: Ws, device_id: DeviceId) -> Result<(), String> {
             }
         }
     }
+}
+
+fn check_inbound_sequence(
+    text: &str,
+    crypto: &Option<(RelayKeyRing, SessionId, GroupId, u64)>,
+    last: &mut u64,
+) -> Result<(), String> {
+    if crypto.is_some() {
+        let envelope: OutboundEnvelope =
+            serde_json::from_str(text).map_err(|_| "relay exige envelope cifrado".to_string())?;
+        if envelope.sequence <= *last {
+            return Err("replay de envelope relay".into());
+        }
+        *last = envelope.sequence;
+    }
+    Ok(())
+}
+
+fn decode_wire(
+    text: &str,
+    crypto: &Option<(RelayKeyRing, SessionId, GroupId, u64)>,
+) -> Result<Message, String> {
+    if let Some((ring, session, group, _)) = crypto {
+        let envelope: OutboundEnvelope =
+            serde_json::from_str(text).map_err(|_| "relay exige envelope cifrado".to_string())?;
+        if envelope.kind != "relay_envelope"
+            || envelope.session_id != *session
+            || envelope.group != *group
+        {
+            return Err("envelope relay inválido".into());
+        }
+        ring.decrypt_message(&envelope.header(), &envelope.payload)
+            .map_err(|e| e.to_string())
+    } else {
+        serde_json::from_str(text).map_err(|e| e.to_string())
+    }
+}
+
+async fn send_wire(
+    ws: &mut Ws,
+    message: Message,
+    crypto: &mut Option<(RelayKeyRing, SessionId, GroupId, u64)>,
+    source: &DeviceId,
+) -> Result<(), String> {
+    let text = if let Some((ring, session, group, sequence)) = crypto {
+        *sequence = (*sequence).checked_add(1).ok_or("sequence exhausted")?;
+        let envelope = OutboundEnvelope {
+            kind: "relay_envelope".into(),
+            session_id: session.clone(),
+            source: source.clone(),
+            destination: None,
+            group: group.clone(),
+            sequence: *sequence,
+            payload: ring
+                .encrypt_message(
+                    &RelayHeader {
+                        session_id: session.as_str(),
+                        source: source.as_str(),
+                        destination: None,
+                        group: group.as_str(),
+                        sequence: *sequence,
+                        key_id: ring.current_key_id(),
+                    },
+                    &message,
+                )
+                .map_err(|e| e.to_string())?,
+        };
+        serde_json::to_string(&envelope).map_err(|e| e.to_string())?
+    } else {
+        serde_json::to_string(&message).map_err(|e| e.to_string())?
+    };
+    ws.send(WsMessage::Text(text))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn png_bytes(image: &ImageData<'_>) -> Result<Vec<u8>, String> {

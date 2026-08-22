@@ -32,4 +32,15 @@ class ProtocolCodecTest {
         ) as Message.PairOk
         assertEquals(null, decoded.server_id)
     }
+    @Test fun `relay envelope cifra com AAD e rejeita chave ou sequencia errada`() {
+        val key = "v1 group-1 " + "11".repeat(32)
+        val message = Message.ClipboardText("text/plain", "segredo", "device", "hash")
+        val envelope = RelayCrypto.encrypt(message, key, "session", "device", 1)
+        assertEquals(message, RelayCrypto.decrypt(envelope, key))
+        assertThrows { RelayCrypto.decrypt(envelope.copy(sequence = 2), key) }
+        assertThrows { RelayCrypto.decrypt(envelope, "v1 group-1 " + "22".repeat(32)) }
+        val tampered = envelope.copy(payload = envelope.payload.copy(ciphertext = "A" + envelope.payload.ciphertext.drop(1)))
+        assertThrows { RelayCrypto.decrypt(tampered, key) }
+    }
+    private fun assertThrows(block: () -> Unit) { runCatching(block).onSuccess { error("esperava falha") } }
 }

@@ -23,6 +23,7 @@ import com.clipsync.android.data.NsdDiscovery
 import com.clipsync.android.data.ProtocolAction
 import com.clipsync.android.data.ProtocolCodec
 import com.clipsync.android.data.ProtocolEngine
+import com.clipsync.android.data.RelayCrypto
 import com.clipsync.android.net.WebSocketClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +57,10 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
     private var engine: ProtocolEngine? = null
     private var selectedServer: DiscoveredServer? = null
     private var currentDeviceId: String? = null
+    private var relaySessionId: String? = null
+    private var relayKeyMaterial: String? = null
+    private var relaySequence = 0L
+    private var relayInboundSequence = 0L
     private val sessions = SessionGeneration()
     private val incomingMessages = Channel<Pair<Long, String>>(Channel.UNLIMITED)
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -122,6 +127,10 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
         val generation = sessions.advance()
         selectedServer = server
         engine = null
+        relaySessionId = null
+        relayKeyMaterial = null
+        relaySequence = 0
+        relayInboundSequence = 0
         currentDeviceId = server?.deviceId ?: server?.serverId?.let(deviceStore::deviceIdFor)
         if (server == null) {
             webSocket.disconnect()
@@ -149,6 +158,15 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
             webSocket.disconnect()
             return
         }
+        if (selectedServer?.remote == true) {
+            val ref = selectedServer?.e2eKeyRef
+            relayKeyMaterial = ref?.let(deviceStore::relayKey)
+            if (relayKeyMaterial.isNullOrBlank()) {
+                setStatus(ConnectionStatus.ERROR, "chave E2E do relay ausente")
+                webSocket.disconnect()
+                return
+            }
+        }
         send(engine!!.onOpen())
         if (selectedServer?.remote == true) {
             setStatus(ConnectionStatus.CONNECTED, "Conectado ao relay")
@@ -161,7 +179,15 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
     }
     private suspend fun handlePayload(generation: Long, payload: String) {
         if (!sessions.accepts(generation)) return
-        val message = try { withContext(Dispatchers.Default) { ProtocolCodec.decode(payload) } } catch (_: Exception) {
+        val message = try { withContext(Dispatchers.Default) {
+            if (selectedServer?.remote == true && relaySessionId != null) {
+                val envelope = ProtocolCodec.decodeEnvelope(payload)
+                if (envelope.sequence <= relayInboundSequence) error("replay de envelope relay")
+                val decoded = RelayCrypto.decrypt(envelope, relayKeyMaterial!!)
+                relayInboundSequence = envelope.sequence
+                decoded
+            } else ProtocolCodec.decode(payload)
+        } } catch (_: Exception) {
             setStatus(ConnectionStatus.ERROR, "Mensagem invalida recebida")
             return
         }
@@ -185,6 +211,7 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
                 action.challenge.expires_at,
             )
             is ProtocolAction.Paired -> {
+                if (selectedServer?.remote == true) relaySessionId = action.result.session_id
                 val discoveredId = selectedServer?.serverId
                 val protocolId = action.result.server_id
                 if (discoveredId != null && protocolId != null && discoveredId != protocolId) {
@@ -266,7 +293,13 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
             connect(target)
         }
     }
-    private fun send(message: Message) { webSocket.send(ProtocolCodec.encode(message), sessions.current) }
+    private fun send(message: Message) {
+        val payload = if (selectedServer?.remote == true && relaySessionId != null) {
+            relaySequence = relaySequence + 1
+            RelayCrypto.encrypt(message, relayKeyMaterial!!, relaySessionId!!, currentDeviceId!!, relaySequence).let(ProtocolCodec::encodeEnvelope)
+        } else ProtocolCodec.encode(message)
+        webSocket.send(payload, sessions.current)
+    }
     override fun onSendFailed(generation: Long) {
         if (sessions.accepts(generation)) {
             setStatus(ConnectionStatus.ERROR, "Falha ao enfileirar mensagem para envio")

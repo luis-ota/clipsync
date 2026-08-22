@@ -254,6 +254,13 @@ relay rejeita `clipboard_*` em claro; clientes relay precisam suportar o
 envelope E2E. TLS/bearer continuam necessários para autenticar e proteger o
 hop, mas não são considerados E2E.
 
+O relay envia um `PairOk` inicial com o `session_id` efêmero; nenhum envelope é
+aceito antes desse handshake. O bearer é referenciado por `credential_ref` e o
+material E2E separado por `e2e_key_ref`, no formato `key_id group_id hex_key`.
+Nenhum segredo é colocado na URL ou registrado em logs. Rust e Android usam o
+mesmo AAD canônico; chave errada, tamper, alteração de header e replay são
+rejeitados.
+
 - O transporte padrão é `wss://`. O daemon gera uma identidade autoassinada
   persistente (`tls-cert.der`/`tls-key.der`, chave com modo 0600). A confiança
   usa o fingerprint SHA-256 do certificado DER, não hostname, IP ou nome mDNS.

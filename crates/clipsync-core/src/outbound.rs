@@ -15,10 +15,12 @@ use tokio_tungstenite::{client_async_tls_with_config, Connector, WebSocketStream
 use tracing::{debug, warn};
 use url::Url;
 
+use crate::auth::SessionId;
 use crate::clipboard::ClipboardEvent;
 use crate::config::{Config, EndpointConfig, EndpointScope, OutboundRoute, Transport};
 use crate::dispatch;
 use crate::protocol::{Capabilities, DeviceInfo, DeviceKind, Message, PROTOCOL_VERSION};
+use crate::relay_crypto::{load_key_ring, OutboundEnvelope};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
@@ -196,7 +198,7 @@ where
             images: clipboard.sync_images,
             files: clipboard.sync_files,
         });
-    device.id = Some(device_id);
+    device.id = Some(device_id.clone());
     let hello = Message::Hello {
         v: PROTOCOL_VERSION,
         device,
@@ -204,6 +206,25 @@ where
     ws.send(WsMessage::Text(serde_json::to_string(&hello).unwrap()))
         .await
         .map_err(|e| e.to_string())?;
+    let (relay, mut sequence) = if endpoint.scope == EndpointScope::Relay {
+        let (ring, group) = load_key_ring(
+            endpoint
+                .e2e_key_ref
+                .as_deref()
+                .ok_or("e2e_key_ref ausente")?,
+        )
+        .map_err(|e| e.to_string())?;
+        let session_id = match next_message(&mut ws).await? {
+            Message::PairOk { session_id, .. } => {
+                SessionId::from_string(session_id).ok_or("relay retornou session_id vazio")?
+            }
+            other => return Err(format!("handshake relay inesperado: {}", other.type_name())),
+        };
+        (Some((ring, session_id, group)), 0u64)
+    } else {
+        (None, 0u64)
+    };
+    let mut last_inbound_sequence = 0u64;
     if endpoint.scope == EndpointScope::Lan {
         loop {
             match next_message(&mut ws).await? {
@@ -222,16 +243,46 @@ where
         tokio::select! {
             message = outbound.recv() => {
                 let Some(message) = message else { return Ok(()) };
-                ws.send(WsMessage::Text(message.to_json().map_err(|e| e.to_string())?)).await.map_err(|e| e.to_string())?;
+                if let Some((ring, session_id, group)) = &relay {
+                    sequence = sequence.checked_add(1).ok_or("sequence exhausted")?;
+                    let source = device_id.clone();
+                    let key_id = ring.current_key_id();
+                    let envelope = OutboundEnvelope {
+                        kind: "relay_envelope".into(),
+                        session_id: session_id.clone(),
+                        source: source.clone(),
+                        destination: None,
+                        group: group.clone(),
+                        sequence,
+                        payload: ring.encrypt_message(&crate::relay_crypto::RelayHeader {
+                            session_id: session_id.as_str(), source: source.as_str(), destination: None,
+                            group: group.as_str(), sequence, key_id,
+                        }, &message).map_err(|e| e.to_string())?,
+                    };
+                    ws.send(WsMessage::Text(serde_json::to_string(&envelope).map_err(|e| e.to_string())?)).await.map_err(|e| e.to_string())?;
+                } else {
+                    ws.send(WsMessage::Text(message.to_json().map_err(|e| e.to_string())?)).await.map_err(|e| e.to_string())?;
+                }
             }
             item = ws.next() => {
                 let Some(item) = item else { return Err("peer fechou conexão".into()) };
                 match item.map_err(|e| e.to_string())? {
-                    WsMessage::Text(text) => match serde_json::from_str::<Message>(&text).map_err(|e| e.to_string())? {
+                    WsMessage::Text(text) => if let Some((ring, session_id, group)) = &relay {
+                        let envelope: OutboundEnvelope = serde_json::from_str(&text).map_err(|_| "relay frame não é envelope cifrado")?;
+                        if envelope.kind != "relay_envelope" || envelope.session_id != *session_id || envelope.group != *group {
+                            return Err("envelope relay inválido".into());
+                        }
+                        let message = ring.decrypt_message(&envelope.header(), &envelope.payload).map_err(|e| e.to_string())?;
+                        if envelope.sequence <= last_inbound_sequence {
+                            return Err("replay de envelope relay".into());
+                        }
+                        last_inbound_sequence = envelope.sequence;
+                        if let Some(event) = dispatch::message_to_event(&message) { let _ = local_events.send(event).await; }
+                    } else { match serde_json::from_str::<Message>(&text).map_err(|e| e.to_string())? {
                         Message::Ping { ts } => ws.send(WsMessage::Text(serde_json::to_string(&Message::Pong { ts }).unwrap())).await.map_err(|e| e.to_string())?,
                         Message::Pong { .. } | Message::PairOk { .. } => {},
                         message => if let Some(event) = dispatch::message_to_event(&message) { let _ = local_events.send(event).await; },
-                    },
+                    } },
                     WsMessage::Ping(data) => ws.send(WsMessage::Pong(data)).await.map_err(|e| e.to_string())?,
                     WsMessage::Close(_) => return Err("peer fechou conexão".into()),
                     WsMessage::Pong(_) | WsMessage::Binary(_) | WsMessage::Frame(_) => {},
@@ -328,6 +379,7 @@ mod tests {
                     transport: Transport::Tls,
                     tls_fingerprint: Some("a".repeat(64)),
                     credential_ref: Some("TOKEN".into()),
+                    e2e_key_ref: Some("KEY".into()),
                     scope: EndpointScope::Relay,
                 },
                 EndpointConfig {
@@ -336,6 +388,7 @@ mod tests {
                     transport: Transport::Tls,
                     tls_fingerprint: Some("b".repeat(64)),
                     credential_ref: None,
+                    e2e_key_ref: None,
                     scope: EndpointScope::Lan,
                 },
             ],

@@ -19,7 +19,7 @@ use axum::routing::get;
 use axum::Router;
 use clipsync_core::auth::{GroupAuthorizer, GroupId, RelayEnvelope, ReplayProtector, SessionId};
 use clipsync_core::protocol::{DeviceId, Message, PROTOCOL_VERSION};
-use clipsync_core::relay_crypto::EncryptedRelayPayload;
+use clipsync_core::relay_crypto::OutboundEnvelope;
 use futures::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -36,30 +36,6 @@ pub struct RelayIdentity {
     pub device_id: DeviceId,
     pub session_id: SessionId,
     pub group_id: GroupId,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct WireEnvelope {
-    #[serde(rename = "type")]
-    kind: String,
-    session_id: SessionId,
-    source: DeviceId,
-    destination: Option<DeviceId>,
-    group: GroupId,
-    sequence: u64,
-    payload: EncryptedRelayPayload,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct OutboundEnvelope {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    session_id: SessionId,
-    source: DeviceId,
-    destination: Option<DeviceId>,
-    group: GroupId,
-    sequence: u64,
-    payload: EncryptedRelayPayload,
 }
 
 #[derive(Debug, Clone)]
@@ -741,6 +717,16 @@ where
     }
     let attached = SessionId::from_string(state.attach(identity.clone(), own_tx.clone()).await)
         .expect("attach always creates a session id");
+    own_tx
+        .send(Arc::new(Outbound::Message(Message::PairOk {
+            device_id: identity.device_id.clone(),
+            server_id: None,
+            session_id: attached.to_string(),
+            server_name: "clipsync-relay".into(),
+            capabilities: Default::default(),
+        })))
+        .await
+        .map_err(|_| ())?;
     info!(%peer, device = %identity.device_id, "relay session connected");
     loop {
         let frame = tokio::select! {
@@ -814,23 +800,12 @@ async fn handle_frame(
             | Ok(Message::ClipboardHtml { .. }) => Err(()),
             Ok(_) => Err(()),
             Err(_) => {
-                let envelope: WireEnvelope = serde_json::from_str(&text).map_err(|_| ())?;
+                let envelope: OutboundEnvelope = serde_json::from_str(&text).map_err(|_| ())?;
                 if envelope.kind != "relay_envelope" || envelope.session_id != *session_id {
                     return Err(());
                 }
                 state
-                    .route_encrypted(
-                        OutboundEnvelope {
-                            kind: "relay_envelope",
-                            session_id: envelope.session_id,
-                            source: envelope.source,
-                            destination: envelope.destination,
-                            group: envelope.group,
-                            sequence: envelope.sequence,
-                            payload: envelope.payload,
-                        },
-                        &identity.device_id,
-                    )
+                    .route_encrypted(envelope, &identity.device_id)
                     .await
                     .map(|_| ())
                     .map_err(|_| ())
@@ -1001,7 +976,7 @@ mod tests {
         ));
         let (target_tx, mut target_rx) = mpsc::channel(2);
         state.attach(target.clone(), target_tx).await;
-        let (source_tx, _) = mpsc::channel(2);
+        let (source_tx, _source_rx) = mpsc::channel(2);
         let hello = Message::Hello {
             v: PROTOCOL_VERSION,
             device: clipsync_core::protocol::DeviceInfo::new(
@@ -1037,6 +1012,83 @@ mod tests {
         assert!(
             target_rx.try_recv().is_err(),
             "relay não deve encaminhar clipboard em claro"
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypted_client_to_relay_to_client_and_replay_are_enforced() {
+        let source = identity("account", "source");
+        let target = identity("account", "target");
+        let mut groups = GroupAuthorizer::default();
+        groups.add_member(source.group_id.clone(), source.device_id.clone());
+        groups.add_member(target.group_id.clone(), target.device_id.clone());
+        let state = RelayState::with_groups_and_limits(
+            groups,
+            clipsync_core::config::LimitsConfig::default(),
+        );
+        let (target_tx, mut target_rx) = mpsc::channel(2);
+        state.attach(target, target_tx).await;
+        let (source_tx, _) = mpsc::channel(2);
+        let session =
+            SessionId::from_string(state.attach(source.clone(), source_tx).await).unwrap();
+        let ring = clipsync_core::relay_crypto::RelayKeyRing::new("v1", [7; 32]).unwrap();
+        let message = Message::ClipboardText {
+            mime: "text/plain".into(),
+            content: "secret".into(),
+            origin: source.device_id.clone(),
+            sha256: "hash".into(),
+        };
+        let payload = ring
+            .encrypt_message(
+                &clipsync_core::relay_crypto::RelayHeader {
+                    session_id: session.as_str(),
+                    source: source.device_id.as_str(),
+                    destination: None,
+                    group: source.group_id.as_str(),
+                    sequence: 1,
+                    key_id: "v1",
+                },
+                &message,
+            )
+            .unwrap();
+        let envelope = OutboundEnvelope {
+            kind: "relay_envelope".into(),
+            session_id: session.clone(),
+            source: source.device_id.clone(),
+            destination: None,
+            group: source.group_id.clone(),
+            sequence: 1,
+            payload,
+        };
+        assert_eq!(
+            state
+                .route_encrypted(envelope.clone(), &source.device_id)
+                .await,
+            Ok(1)
+        );
+        let delivered = match target_rx.recv().await.unwrap().as_ref() {
+            Outbound::Envelope(value) => value.clone(),
+            other => panic!("unexpected route: {other:?}"),
+        };
+        assert_eq!(
+            ring.decrypt_message(&delivered.header(), &delivered.payload)
+                .unwrap()
+                .type_name(),
+            "clipboard_text"
+        );
+        assert!(
+            state
+                .route_encrypted(envelope, &source.device_id)
+                .await
+                .is_err(),
+            "replay must be rejected"
+        );
+        let wrong = clipsync_core::relay_crypto::RelayKeyRing::new("v1", [8; 32]).unwrap();
+        assert!(
+            wrong
+                .decrypt_message(&delivered.header(), &delivered.payload)
+                .is_err(),
+            "wrong key must not decrypt"
         );
     }
     #[test]
