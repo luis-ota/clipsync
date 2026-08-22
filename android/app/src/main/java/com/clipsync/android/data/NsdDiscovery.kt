@@ -11,6 +11,7 @@ class NsdDiscovery(context: Context, private val onChanged: (DiscoverySnapshot) 
     private val multicastLock = context.getSystemService(WifiManager::class.java)
         .createMulticastLock("clipsync-mdns").apply { setReferenceCounted(false) }
     private val servers = linkedMapOf<String, DiscoveredServer>()
+    private val lostServices = mutableSetOf<String>()
     private val pendingResolutions = ArrayDeque<NsdServiceInfo>()
     private var running = false
     private var resolving = false
@@ -23,6 +24,7 @@ class NsdDiscovery(context: Context, private val onChanged: (DiscoverySnapshot) 
         epoch++
         val currentEpoch = epoch
         servers.clear()
+        lostServices.clear()
         pendingResolutions.clear()
         resolving = false
         onChanged(DiscoverySnapshot(currentEpoch, emptyList()))
@@ -56,6 +58,7 @@ class NsdDiscovery(context: Context, private val onChanged: (DiscoverySnapshot) 
         }
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
         override fun onServiceFound(info: NsdServiceInfo) {
+            lostServices.remove(info.serviceName)
             if (running && listenerEpoch == epoch && info.serviceType.startsWith(SERVICE_TYPE) &&
                 pendingResolutions.none { it.serviceName == info.serviceName }
             ) {
@@ -65,6 +68,8 @@ class NsdDiscovery(context: Context, private val onChanged: (DiscoverySnapshot) 
         }
         override fun onServiceLost(info: NsdServiceInfo) {
             if (listenerEpoch != epoch) return
+            lostServices.add(info.serviceName)
+            pendingResolutions.removeAll { it.serviceName == info.serviceName }
             servers.remove(info.serviceName)
             publish(listenerEpoch)
         }
@@ -85,6 +90,10 @@ class NsdDiscovery(context: Context, private val onChanged: (DiscoverySnapshot) 
                 if (resolveEpoch != epoch) return
                 resolving = false
                 if (!running) return
+                if (lostServices.contains(serviceInfo.serviceName)) {
+                    resolveNext(resolveEpoch)
+                    return
+                }
                 val host = serviceInfo.host?.hostAddress ?: run {
                     resolveNext(resolveEpoch)
                     return

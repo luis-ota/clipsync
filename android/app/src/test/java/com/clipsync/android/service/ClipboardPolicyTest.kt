@@ -8,8 +8,9 @@ class ClipboardPolicyTest {
     @Test fun `limite de imagem aceita imediatamente abaixo e rejeita acima`() {
         assertTrue(ImageLimits.acceptsRawSize(ImageLimits.MAX_IMAGE_BYTES))
         assertFalse(ImageLimits.acceptsRawSize(ImageLimits.MAX_IMAGE_BYTES + 1))
-        val encodedUpperBound = ((ImageLimits.MAX_IMAGE_BYTES + 2) / 3) * 4 + 8 * 1024
-        assertTrue(encodedUpperBound <= ImageLimits.MAX_WEBSOCKET_MESSAGE_BYTES)
+        assertTrue(ImageLimits.acceptsEncodedSize(((ImageLimits.MAX_IMAGE_BYTES + 2) / 3) * 4))
+        assertFalse(ImageLimits.acceptsEncodedSize(ImageLimits.MAX_WEBSOCKET_MESSAGE_BYTES - 8 * 1024 + 1))
+        assertFalse(ImageLimits.acceptsEncodedSize(ImageLimits.MAX_WEBSOCKET_MESSAGE_BYTES + 1))
     }
 
     @Test fun `anti eco suporta escritas consecutivas e expira callback ausente`() {

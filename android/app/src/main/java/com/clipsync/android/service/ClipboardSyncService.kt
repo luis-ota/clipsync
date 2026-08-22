@@ -34,10 +34,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal class SessionGeneration {
-    var current: Long = 0
-        private set
-    fun advance(): Long = ++current
-    fun accepts(candidate: Long): Boolean = candidate == current
+    private var value = 0L
+    val current: Long get() = synchronized(this) { value }
+    @Synchronized fun advance(): Long = ++value
+    @Synchronized fun accepts(candidate: Long): Boolean = candidate == value
 }
 
 class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
@@ -51,7 +51,6 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
     private var currentDeviceId: String? = null
     private val sessions = SessionGeneration()
     private val incomingMessages = Channel<Pair<Long, String>>(Channel.UNLIMITED)
-    private var autoSelected = false
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) { scope.launch { discovery.restart() } }
     }
@@ -67,8 +66,11 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
         discovery = NsdDiscovery(this) { snapshot ->
             scope.launch {
                 AppRepository.setServers(snapshot)
-                if (!autoSelected && AppRepository.state.value.selectedServerId == null && snapshot.servers.isNotEmpty()) {
-                    autoSelected = true
+                val selectedId = AppRepository.state.value.selectedServerId
+                if (selectedId != null && snapshot.servers.none { it.id == selectedId } &&
+                    AppRepository.state.value.servers.none { it.id == selectedId && it.remote }
+                ) AppRepository.select(null)
+                if (AppRepository.state.value.selectedServerId == null && snapshot.servers.isNotEmpty()) {
                     AppRepository.select(snapshot.servers.firstOrNull { !it.remote }?.id ?: snapshot.servers.first().id)
                 }
             }
