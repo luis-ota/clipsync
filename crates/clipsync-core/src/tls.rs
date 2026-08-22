@@ -86,7 +86,10 @@ impl Identity {
     pub fn server_config(&self) -> Result<Arc<rustls::ServerConfig>> {
         let cert = CertificateDer::from(self.cert_der.clone());
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_der.clone()));
-        let config = rustls::ServerConfig::builder()
+        let provider = rustls::crypto::ring::default_provider();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| Error::Config(format!("versões TLS inválidas: {e}")))?
             .with_no_client_auth()
             .with_single_cert(vec![cert], key)
             .map_err(|e| Error::Config(format!("certificado TLS inválido: {e}")))?;
