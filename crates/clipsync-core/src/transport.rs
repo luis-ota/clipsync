@@ -139,7 +139,7 @@ impl ConnectionInner {
                 // nome do handshake como fallback.
                 pm.device_name(&id).unwrap_or(&device_info.name).to_owned()
             };
-            self.state.pairing.lock().await.mark_seen(&id);
+            self.state.pairing.lock().await.mark_seen(&id)?;
             info!(peer = %self.addr, device = %id, name = %name, "device confiado conectado");
             session.attach(id.clone(), name.clone()).await;
             session.send(Message::PairOk {

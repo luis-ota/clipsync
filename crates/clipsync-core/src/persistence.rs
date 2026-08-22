@@ -6,10 +6,25 @@ use std::path::{Path, PathBuf};
 
 /// Substitui `path` atomicamente por `contents` e sincroniza dados e diretório.
 pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+    atomic_write_with_mode(path, contents, None)
+}
+
+pub(crate) fn atomic_write_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<u32>,
+) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
     let mut temporary = TemporaryPath::create(path)?;
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .file
+            .set_permissions(fs::Permissions::from_mode(mode))?;
+    }
     temporary.file.write_all(contents)?;
     temporary.file.sync_all()?;
     fs::rename(&temporary.path, path)?;

@@ -108,7 +108,7 @@ impl TrustedStore {
         }
         let toml_str = toml::to_string_pretty(self)
             .map_err(|e| crate::Error::Config(format!("falha serializando trusted: {e}")))?;
-        crate::persistence::atomic_write(path, toml_str.as_bytes())
+        crate::persistence::atomic_write_with_mode(path, toml_str.as_bytes(), Some(0o600))
             .map_err(|e| crate::Error::Config(format!("falha salvando {path:?}: {e}")))?;
         Ok(())
     }
@@ -150,6 +150,14 @@ impl TrustedStoreLock {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| crate::Error::Config(format!("falha abrindo {lock_path:?}: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| {
+                    crate::Error::Config(format!("falha protegendo {lock_path:?}: {e}"))
+                })?;
+        }
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Self { _file: file }),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -354,10 +362,13 @@ impl PairingManager {
     }
 
     /// Atualiza `last_seen` de um device confiado.
-    pub fn mark_seen(&mut self, id: &DeviceId) {
+    pub fn mark_seen(&mut self, id: &DeviceId) -> Result<()> {
         if let Some(t) = self.trusted.get_mut(id) {
             t.last_seen = chrono::Utc::now().timestamp();
+            let next_trusted = self.trusted.clone();
+            self.commit_trusted(next_trusted)?;
         }
+        Ok(())
     }
 
     /// Lista os devices confiados (para `clipsyncd list-peers`).
@@ -737,6 +748,42 @@ mod tests {
         assert_eq!(pm2.trusted_devices().len(), 1);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mark_seen_is_persisted() {
+        let dir = std::env::temp_dir().join(format!("clipsync-seen-{}", std::process::id()));
+        let path = dir.join("trusted.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut manager = PairingManager::new_with_store(&path).unwrap();
+        let id = manager.trust("phone", "android").unwrap();
+        let before = manager
+            .trusted_devices()
+            .iter()
+            .find(|device| device.id == id)
+            .unwrap()
+            .last_seen;
+        manager.mark_seen(&id).unwrap();
+        let after = manager
+            .trusted_devices()
+            .iter()
+            .find(|device| device.id == id)
+            .unwrap()
+            .last_seen;
+        assert!(after >= before);
+        drop(manager);
+        let reloaded = PairingManager::new_with_store(&path).unwrap();
+        assert_eq!(reloaded.device_name(&id), Some("phone"));
+        assert_eq!(
+            reloaded
+                .trusted_devices()
+                .iter()
+                .find(|device| device.id == id)
+                .unwrap()
+                .last_seen,
+            after
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
