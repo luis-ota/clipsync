@@ -1,9 +1,10 @@
-# TLS termina no Caddy e o hop interno continua TLS. Monte o certificado DER
-# do relay em /etc/caddy/tls/relay-cert.der e não desabilite sua validação.
+# TLS termina no Caddy e o hop interno continua TLS. Monte o certificado PEM
+# do relay em /etc/caddy/tls/relay-cert.pem e não desabilite sua validação.
 relay.example.com {
     reverse_proxy https://clipsync-relay:8765 {
         transport http {
-            tls_trust_pool file /etc/caddy/tls/relay-cert.der
+            tls_server_name clipsync-relay
+            tls_trust_pool file /etc/caddy/tls/relay-cert.pem
         }
     }
 }

@@ -738,6 +738,7 @@ async fn handle_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn identity(account: &str, device: &str) -> RelayIdentity {
         RelayIdentity {
@@ -746,6 +747,19 @@ mod tests {
             session_id: SessionId::from_string(format!("session-{device}")).unwrap(),
             group_id: GroupId::from_string(format!("group-{account}")).unwrap(),
         }
+    }
+
+    #[tokio::test]
+    async fn file_token_provider_reads_expected_format_without_plaintext_storage() {
+        let path =
+            std::env::temp_dir().join(format!("clipsync-relay-token-{}", std::process::id()));
+        std::fs::write(&path, "smoke-token account device session group\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let provider = FileTokenProvider::from_path(&path).unwrap();
+        let verified = provider.verify("smoke-token").await.unwrap();
+        assert_eq!(verified.account_id, "account");
+        assert!(provider.verify("wrong-token").await.is_err());
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

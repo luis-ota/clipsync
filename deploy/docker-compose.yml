@@ -17,19 +17,18 @@ services:
       CLIPSYNC_LIMITS_MAX_CONNECTIONS: ${CLIPSYNC_LIMITS_MAX_CONNECTIONS:-256}
       CLIPSYNC_LIMITS_MESSAGES_PER_MINUTE: ${CLIPSYNC_LIMITS_MESSAGES_PER_MINUTE:-120}
       CLIPSYNC_LIMITS_BYTES_PER_MINUTE: ${CLIPSYNC_LIMITS_BYTES_PER_MINUTE:-67108864}
-      CLIPSYNC_RELAY_TOKEN: ${CLIPSYNC_RELAY_TOKEN:?CLIPSYNC_RELAY_TOKEN must be set}
-      CLIPSYNC_RELAY_ACCOUNT_ID: ${CLIPSYNC_RELAY_ACCOUNT_ID:?CLIPSYNC_RELAY_ACCOUNT_ID must be set}
-      CLIPSYNC_RELAY_DEVICE_ID: ${CLIPSYNC_RELAY_DEVICE_ID:?CLIPSYNC_RELAY_DEVICE_ID must be set}
+      CLIPSYNC_RELAY_TOKEN_FILE: /etc/clipsync/relay.tokens
     volumes:
       - clipsync-state:/var/lib/clipsync
       - ./config/relay.toml:/etc/clipsync/config.toml:ro
+      - ${CLIPSYNC_RELAY_TOKEN_FILE:-./relay.tokens}:/etc/clipsync/relay.tokens:ro
     ports:
       - "${CLIPSYNC_PORT:-8765}:8765"
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--insecure", "https://127.0.0.1:8765/readyz"]
+      test: ["CMD", "curl", "--fail", "--silent", "--cacert", "/var/lib/clipsync/tls-cert.pem", "https://127.0.0.1:8765/readyz"]
       interval: 10s
       timeout: 3s
       retries: 6
