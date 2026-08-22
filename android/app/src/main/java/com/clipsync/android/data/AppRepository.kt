@@ -14,6 +14,7 @@ data class DiscoveredServer(
     val port: Int,
     val tls: Boolean = true,
     val tlsFingerprint: String? = null,
+    val remote: Boolean = false,
 ) {
     val id: String get() = serverId ?: "legacy:$serviceName"
 }
@@ -36,11 +37,24 @@ object AppRepository {
     val pins = mutablePins.asSharedFlow()
 
     private var discoveryEpoch = -1L
+    private val remoteServers = linkedMapOf<String, DiscoveredServer>()
+
+    fun setRemoteEndpoints(endpoints: List<DiscoveredServer>) {
+        remoteServers.clear()
+        endpoints.forEach { remoteServers[it.id] = it.copy(remote = true) }
+        publishServers()
+    }
+
+    fun addRemoteEndpoint(endpoint: DiscoveredServer) {
+        remoteServers[endpoint.id] = endpoint.copy(remote = true)
+        publishServers()
+    }
 
     fun setServers(snapshot: DiscoverySnapshot) {
         if (snapshot.epoch < discoveryEpoch) return
         discoveryEpoch = snapshot.epoch
-        val servers = snapshot.servers.sortedBy(DiscoveredServer::name)
+        val servers = (snapshot.servers + remoteServers.values)
+            .distinctBy(DiscoveredServer::id).sortedBy(DiscoveredServer::name)
         mutableState.update { it.copy(servers = servers) }
         mutableTargets.value = servers.firstOrNull { it.id == mutableState.value.selectedServerId }
     }
@@ -51,5 +65,12 @@ object AppRepository {
     fun submitPin(pin: String) { mutablePins.tryEmit(pin) }
     fun updateStatus(status: ConnectionStatus, detail: String, expiresAt: Long? = null) {
         mutableState.update { it.copy(status = status, statusDetail = detail, pinExpiresAt = expiresAt) }
+    }
+
+    private fun publishServers() {
+        val servers = (mutableState.value.servers.filterNot(DiscoveredServer::remote) + remoteServers.values)
+            .distinctBy(DiscoveredServer::id).sortedBy(DiscoveredServer::name)
+        mutableState.update { it.copy(servers = servers) }
+        mutableTargets.value = servers.firstOrNull { it.id == mutableState.value.selectedServerId }
     }
 }

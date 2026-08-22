@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use clipsync_core::clipboard::{ClipboardEvent, ClipboardManager};
-use clipsync_core::config::Config;
+use clipsync_core::config::{Config, EndpointConfig, Transport};
 use clipsync_core::discovery::Discovery;
 use clipsync_core::dispatch;
 use clipsync_core::server::{Server, ServerConfig};
@@ -58,6 +58,32 @@ enum Commands {
         /// Tempo máximo de espera pela descoberta, em segundos.
         #[arg(long, default_value_t = 5)]
         timeout: u64,
+    },
+    /// Gerencia endpoints de clientes LAN/relay. Tokens ficam fora do TOML.
+    Endpoints {
+        #[command(subcommand)]
+        command: EndpointCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum EndpointCommands {
+    List,
+    Add {
+        name: String,
+        url: String,
+        #[arg(long, default_value = "tls")]
+        transport: String,
+        #[arg(long)]
+        tls_fingerprint: Option<String>,
+        #[arg(long)]
+        credential_ref: Option<String>,
+    },
+    Remove {
+        name: String,
+    },
+    Select {
+        name: String,
     },
 }
 
@@ -196,6 +222,104 @@ fn load_config_or_exit() -> Config {
         Err(error) => {
             eprintln!("Erro carregando configuração: {error}");
             std::process::exit(1);
+        }
+    }
+}
+
+fn config_path_or_exit() -> std::path::PathBuf {
+    match clipsync_core::config::default_config_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Erro localizando configuração: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_endpoints(command: EndpointCommands) {
+    let path = config_path_or_exit();
+    let mut config = match Config::load_or_default(Some(&path)) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Erro carregando configuração: {error}");
+            std::process::exit(1);
+        }
+    };
+    match command {
+        EndpointCommands::List => {
+            for endpoint in &config.endpoints {
+                println!(
+                    "{} {} transport={:?} pin={} credential_ref={}",
+                    endpoint.name,
+                    endpoint.url,
+                    endpoint.transport,
+                    endpoint
+                        .tls_fingerprint
+                        .as_deref()
+                        .map(|_| "configured")
+                        .unwrap_or("missing"),
+                    endpoint.credential_ref.as_deref().unwrap_or("none")
+                );
+            }
+        }
+        EndpointCommands::Add {
+            name,
+            url,
+            transport,
+            tls_fingerprint,
+            credential_ref,
+        } => {
+            let transport = match transport.as_str() {
+                "tls" => Transport::Tls,
+                "plaintext_legacy" => Transport::PlaintextLegacy,
+                _ => {
+                    eprintln!("transport deve ser tls ou plaintext_legacy");
+                    std::process::exit(2);
+                }
+            };
+            let endpoint = EndpointConfig {
+                name: name.clone(),
+                url,
+                transport,
+                tls_fingerprint,
+                credential_ref,
+            };
+            if let Err(error) = endpoint.validate() {
+                eprintln!("Erro no endpoint: {error}");
+                std::process::exit(2);
+            }
+            config.endpoints.retain(|item| item.name != name);
+            config.endpoints.push(endpoint);
+            if let Err(error) = config.save(&path) {
+                eprintln!("Erro salvando configuração: {error}");
+                std::process::exit(1);
+            }
+            println!("Endpoint '{name}' salvo (credencial não armazenada).");
+        }
+        EndpointCommands::Remove { name } => {
+            let before = config.endpoints.len();
+            config.endpoints.retain(|item| item.name != name);
+            if before == config.endpoints.len() {
+                eprintln!("Endpoint não encontrado: {name}");
+                std::process::exit(1);
+            }
+            config.save(&path).unwrap_or_else(|error| {
+                eprintln!("Erro salvando configuração: {error}");
+                std::process::exit(1);
+            });
+            println!("Endpoint '{name}' removido.");
+        }
+        EndpointCommands::Select { name } => {
+            if !config.endpoints.iter().any(|item| item.name == name) {
+                eprintln!("Endpoint não encontrado: {name}");
+                std::process::exit(1);
+            }
+            config.endpoints.sort_by_key(|item| item.name != name);
+            config.save(&path).unwrap_or_else(|error| {
+                eprintln!("Erro salvando configuração: {error}");
+                std::process::exit(1);
+            });
+            println!("Endpoint '{name}' selecionado como fallback primário.");
         }
     }
 }
@@ -434,6 +558,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Commands::Endpoints { command }) => cmd_endpoints(command),
         None => {
             if let Err(e) = cmd_run(load_config_or_exit(), false).await {
                 eprintln!("Erro: {e}");
@@ -510,5 +635,18 @@ mod tests {
         let path = temp_path("list-empty");
         let _ = std::fs::remove_file(&path);
         assert!(list_trusted(&path).is_ok());
+    }
+
+    #[test]
+    fn endpoint_listing_redacts_secret_fields() {
+        let endpoint = EndpointConfig {
+            name: "relay".into(),
+            url: "wss://relay/ws".into(),
+            transport: Transport::Tls,
+            tls_fingerprint: Some("a".repeat(64)),
+            credential_ref: Some("TOKEN_ENV".into()),
+        };
+        assert!(!format!("{endpoint:?}").contains("secret"));
+        assert!(endpoint.validate().is_ok());
     }
 }

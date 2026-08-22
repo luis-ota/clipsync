@@ -56,6 +56,8 @@ pub struct Config {
     pub discovery: DiscoveryConfig,
     pub clipboard: ClipboardConfig,
     pub security: SecurityConfig,
+    /// Destinos de clientes remotos (LAN ou relay compatível com `/ws`).
+    pub endpoints: Vec<EndpointConfig>,
 }
 
 impl Default for Config {
@@ -67,7 +69,47 @@ impl Default for Config {
             discovery: DiscoveryConfig::default(),
             clipboard: ClipboardConfig::default(),
             security: SecurityConfig::default(),
+            endpoints: Vec::new(),
         }
+    }
+}
+
+/// Destino WebSocket configurado para um cliente Linux. O segredo nunca é
+/// armazenado aqui: `credential_ref` aponta para um provedor externo.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EndpointConfig {
+    pub name: String,
+    pub url: String,
+    #[serde(default)]
+    pub transport: Transport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<String>,
+}
+
+impl EndpointConfig {
+    pub fn validate(&self) -> Result<()> {
+        let scheme = self.url.split("://").next().unwrap_or_default();
+        let expected = match self.transport {
+            Transport::Tls => "wss",
+            Transport::PlaintextLegacy => "ws",
+        };
+        if scheme != expected || !self.url.ends_with("/ws") || self.url.contains('@') {
+            return Err(Error::Config(format!(
+                "endpoint '{}' deve ser {expected}://host:porta/ws sem credenciais na URL",
+                self.name
+            )));
+        }
+        if matches!(self.transport, Transport::Tls)
+            && self.tls_fingerprint.as_deref().map(str::len) != Some(64)
+        {
+            return Err(Error::Config(format!(
+                "endpoint '{}' exige fingerprint TLS SHA-256",
+                self.name
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -219,6 +261,9 @@ impl Config {
             cfg.save(&path)?;
             info!(path = %path.display(), "config criada ou atualizada atomicamente");
         }
+        for endpoint in &cfg.endpoints {
+            endpoint.validate()?;
+        }
         Ok(cfg)
     }
 
@@ -305,5 +350,23 @@ mod tests {
         let second = Config::load_or_default(Some(&path)).unwrap();
         assert_eq!(second.device_id, Some(id));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn endpoint_requires_pinning_and_rejects_url_credentials() {
+        let endpoint = EndpointConfig {
+            name: "relay".into(),
+            url: "wss://relay.example/ws".into(),
+            transport: Transport::Tls,
+            tls_fingerprint: Some("a".repeat(64)),
+            credential_ref: Some("CLIPSYNC_RELAY_TOKEN".into()),
+        };
+        assert!(endpoint.validate().is_ok());
+        assert!(EndpointConfig {
+            url: "wss://user:secret@relay.example/ws".into(),
+            ..endpoint
+        }
+        .validate()
+        .is_err());
     }
 }

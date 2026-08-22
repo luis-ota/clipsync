@@ -61,6 +61,7 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, notification("Iniciando descoberta"))
         deviceStore = DeviceStore(this)
+        AppRepository.setRemoteEndpoints(deviceStore.loadEndpoints())
         webSocket = WebSocketClient(this)
         clipboard = ClipboardWatcher(this, scope, { currentDeviceId }, ::sendClipboard).also { it.start() }
         discovery = NsdDiscovery(this) { snapshot ->
@@ -68,7 +69,7 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
                 AppRepository.setServers(snapshot)
                 if (!autoSelected && AppRepository.state.value.selectedServerId == null && snapshot.servers.isNotEmpty()) {
                     autoSelected = true
-                    AppRepository.select(snapshot.servers.first().id)
+                    AppRepository.select(snapshot.servers.firstOrNull { !it.remote }?.id ?: snapshot.servers.first().id)
                 }
             }
         }.also { it.start() }
