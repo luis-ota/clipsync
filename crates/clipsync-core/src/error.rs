@@ -1,5 +1,6 @@
 //! Tipos de erro da crate `clipsync-core`.
 
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -21,6 +22,9 @@ pub enum Error {
 
     #[error("config error: {0}")]
     Config(String),
+
+    #[error("trusted store em uso por outro processo: {}", .0.display())]
+    StoreBusy(PathBuf),
 
     #[error("clipboard backend unavailable: {0}")]
     Clipboard(String),

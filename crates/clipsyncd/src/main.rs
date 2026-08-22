@@ -313,6 +313,7 @@ fn list_trusted(path: &std::path::Path) -> clipsync_core::Result<()> {
 /// Remove o device `device_id` do store persistido em `path`.
 /// Retorna true se o device existia e foi removido (e salvo em disco).
 fn untrust_device(path: &std::path::Path, device_id: &str) -> clipsync_core::Result<bool> {
+    let _store_lock = clipsync_core::pairing::TrustedStoreLock::try_acquire(path)?;
     let mut store = clipsync_core::pairing::TrustedStore::load(path)?;
     if store.remove(device_id) {
         store.save(path)?;
@@ -475,6 +476,18 @@ mod tests {
         let path = temp_path("untrust-no-file");
         let _ = std::fs::remove_file(&path);
         assert!(!untrust_device(&path, "abc-123").unwrap());
+    }
+
+    #[test]
+    fn untrust_refuses_store_owned_by_daemon() {
+        let path = temp_path("untrust-busy");
+        let _ = std::fs::remove_file(&path);
+        let _owner = clipsync_core::pairing::PairingManager::new_with_store(&path).unwrap();
+
+        assert!(matches!(
+            untrust_device(&path, "abc-123"),
+            Err(clipsync_core::Error::StoreBusy(busy_path)) if busy_path == path
+        ));
     }
 
     #[test]

@@ -8,9 +8,11 @@
 //! como pareado e passa a ser confiado nas conexões seguintes.
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
@@ -72,10 +74,9 @@ pub struct TrustedDevice {
 
 /// Store persistido de devices confiados (`trusted.toml`).
 ///
-/// Formato: TOML com um array `devices` de [`TrustedDevice`]. O daemon
-/// ainda mantém os confiados em memória; este store é o formato de
-/// intercâmbio usado pelas ferramentas offline do CLI (`list-peers`,
-/// `untrust`) e pode ser usado pelo daemon para persistir ao encerrar.
+/// Formato: TOML com um array `devices` de [`TrustedDevice`]. O processo que
+/// o altera deve possuir um [`TrustedStoreLock`]; o daemon mantém esse lock
+/// durante toda a execução e é o owner do estado em memória.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrustedStore {
@@ -99,7 +100,7 @@ impl TrustedStore {
         Self::load(&crate::config::trusted_devices_path()?)
     }
 
-    /// Salva o store em um path TOML (cria os diretórios pais).
+    /// Salva o store atomicamente em um path TOML.
     pub fn save(&self, path: &std::path::Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -107,7 +108,7 @@ impl TrustedStore {
         }
         let toml_str = toml::to_string_pretty(self)
             .map_err(|e| crate::Error::Config(format!("falha serializando trusted: {e}")))?;
-        std::fs::write(path, toml_str)
+        crate::persistence::atomic_write(path, toml_str.as_bytes())
             .map_err(|e| crate::Error::Config(format!("falha salvando {path:?}: {e}")))?;
         Ok(())
     }
@@ -128,27 +129,62 @@ impl TrustedStore {
     }
 }
 
+/// Lock interprocesso exclusivo associado a um trusted store.
+#[derive(Debug)]
+pub struct TrustedStoreLock {
+    _file: File,
+}
+
+impl TrustedStoreLock {
+    /// Tenta adquirir ownership exclusivo sem bloquear.
+    pub fn try_acquire(store_path: &std::path::Path) -> Result<Self> {
+        if let Some(parent) = store_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| crate::Error::Config(format!("falha criando {parent:?}: {e}")))?;
+        }
+        let lock_path = store_path.with_extension("toml.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| crate::Error::Config(format!("falha abrindo {lock_path:?}: {e}")))?;
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(crate::Error::StoreBusy(store_path.to_path_buf()))
+            }
+            Err(error) => Err(crate::Error::Config(format!(
+                "falha adquirindo lock de {store_path:?}: {error}"
+            ))),
+        }
+    }
+}
+
 /// Gerencia desafios de pareamento ativos e o store de confiados.
 ///
-/// Cada desafio pertence a uma única conexão. Desafios de conexões
-/// diferentes podem coexistir; isso evita que o nome apresentado pelo client
-/// seja usado como identidade de autenticação.
+/// Existe no máximo um desafio global porque a interface local apresenta um
+/// único PIN. Iniciar outro desafio invalida o anterior; a sessão continua
+/// sendo parte da validação e o nome nunca é usado como identidade.
 ///
 /// Quando construído com [`PairingManager::new_with_store`], as
 /// alterações de confiança (submit, trust, untrust) são persistidas
 /// automaticamente em disco via [`TrustedStore`].
 #[derive(Default)]
 pub struct PairingManager {
-    challenges: HashMap<String, PairChallenge>,
+    challenge: Option<PairChallenge>,
     trusted: HashMap<DeviceId, TrustedDevice>,
     /// Se `Some`, alterações de confiança são persistidas neste path.
     store_path: Option<PathBuf>,
+    /// Mantém ownership exclusivo do store durante toda a vida do manager.
+    _store_lock: Option<TrustedStoreLock>,
 }
 
 impl std::fmt::Debug for PairingManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PairingManager")
-            .field("challenges", &self.challenges)
+            .field("challenge", &self.challenge)
             .field("trusted", &self.trusted)
             .field("store_path", &self.store_path)
             .finish()
@@ -169,28 +205,29 @@ impl PairingManager {
     /// salvas em `path`.
     pub fn new_with_store(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
+        let store_lock = TrustedStoreLock::try_acquire(&path)?;
         let store = TrustedStore::load(&path)?;
         let mut trusted = HashMap::new();
         for dev in store.devices {
             trusted.insert(dev.id.clone(), dev);
         }
         Ok(Self {
-            challenges: HashMap::new(),
+            challenge: None,
             trusted,
             store_path: Some(path),
+            _store_lock: Some(store_lock),
         })
     }
 
-    /// Persiste o estado atual de `self.trusted` em disco.
-    /// Chamado automaticamente após submit, trust e untrust quando
-    /// `store_path` está configurado.
-    fn persist(&self) -> Result<()> {
+    /// Persiste e só então publica um novo conjunto de devices confiados.
+    fn commit_trusted(&mut self, trusted: HashMap<DeviceId, TrustedDevice>) -> Result<()> {
         if let Some(path) = &self.store_path {
             let store = TrustedStore {
-                devices: self.trusted.values().cloned().collect(),
+                devices: trusted.values().cloned().collect(),
             };
             store.save(path)?;
         }
+        self.trusted = trusted;
         Ok(())
     }
 
@@ -214,7 +251,7 @@ impl PairingManager {
             device_name: device_name.to_owned(),
         };
         debug!(device = %device_name, %code, "novo desafio de pareamento");
-        self.challenges.insert(challenge_id, challenge.clone());
+        self.challenge = Some(challenge.clone());
         challenge
     }
 
@@ -231,8 +268,9 @@ impl PairingManager {
         kind: &str,
     ) -> std::result::Result<DeviceId, PairingError> {
         let challenge = self
-            .challenges
-            .get_mut(challenge_id)
+            .challenge
+            .as_mut()
+            .filter(|challenge| challenge.challenge_id == challenge_id)
             .ok_or(PairingError::Invalid(PairFailReason::Expired))?;
 
         if challenge.session_id != session_id {
@@ -241,12 +279,8 @@ impl PairingManager {
         let device_name = challenge.device_name.clone();
 
         if challenge.expires_at <= Instant::now() {
-            self.challenges.remove(challenge_id);
+            self.challenge = None;
             return Err(PairingError::Invalid(PairFailReason::Expired));
-        }
-
-        if challenge.challenge_id != challenge_id {
-            return Err(PairingError::Invalid(PairFailReason::InvalidCode));
         }
 
         if challenge.nonce != nonce {
@@ -256,13 +290,13 @@ impl PairingManager {
         if challenge.code != code {
             challenge.attempts_left = challenge.attempts_left.saturating_sub(1);
             if challenge.attempts_left == 0 {
-                self.challenges.remove(challenge_id);
+                self.challenge = None;
                 return Err(PairingError::Invalid(PairFailReason::TooManyAttempts));
             }
             return Err(PairingError::Invalid(PairFailReason::InvalidCode));
         }
 
-        // Sucesso: consome o desafio.
+        // O desafio só é consumido depois que a confiança foi persistida.
         let dev_id = DeviceId::new();
         let now = chrono::Utc::now().timestamp();
         let trusted = TrustedDevice {
@@ -273,20 +307,19 @@ impl PairingManager {
             paired_at: now,
             trusted: true,
         };
-        self.trusted.insert(dev_id.clone(), trusted);
-        self.challenges.remove(challenge_id);
-        if let Err(error) = self.persist() {
-            self.trusted.remove(&dev_id);
-            return Err(error.into());
-        }
+        let mut next_trusted = self.trusted.clone();
+        next_trusted.insert(dev_id.clone(), trusted);
+        self.commit_trusted(next_trusted)?;
+        self.challenge = None;
         info!(device = %device_name, id = %dev_id, "device pareado");
         Ok(dev_id)
     }
 
     /// Cancela todos os desafios pertencentes a uma conexão encerrada.
     pub fn cancel_session(&mut self, session_id: &str) {
-        self.challenges
-            .retain(|_, challenge| challenge.session_id != session_id);
+        if matches!(&self.challenge, Some(challenge) if challenge.session_id == session_id) {
+            self.challenge = None;
+        }
     }
 
     /// Marca um device como confiado diretamente (para bootstrap
@@ -302,11 +335,9 @@ impl PairingManager {
             paired_at: now,
             trusted: true,
         };
-        self.trusted.insert(id.clone(), trusted);
-        if let Err(error) = self.persist() {
-            self.trusted.remove(&id);
-            return Err(error);
-        }
+        let mut next_trusted = self.trusted.clone();
+        next_trusted.insert(id.clone(), trusted);
+        self.commit_trusted(next_trusted)?;
         info!(device = %name, id = %id, "device confiado via bootstrap");
         Ok(id)
     }
@@ -337,25 +368,22 @@ impl PairingManager {
 
     /// Remove um device da lista de confiados.
     pub fn untrust(&mut self, id: &DeviceId) -> Result<bool> {
-        let removed = self.trusted.remove(id);
-        if let Some(device) = &removed {
-            if let Err(error) = self.persist() {
-                self.trusted.insert(id.clone(), device.clone());
-                return Err(error);
-            }
+        let mut next_trusted = self.trusted.clone();
+        if next_trusted.remove(id).is_some() {
+            self.commit_trusted(next_trusted)?;
+            return Ok(true);
         }
-        Ok(removed.is_some())
+        Ok(false)
     }
 
     /// Retorna o PIN mais recente ainda ativo, se houver.
     ///
     /// Acessor mínimo exposto para o ícone de bandeja do `clipsyncd`.
     pub fn active_pin(&self) -> Option<String> {
-        self.challenges
-            .values()
-            .filter(|c| c.expires_at > Instant::now())
-            .max_by_key(|c| c.expires_at)
-            .map(|c| c.code.clone())
+        self.challenge
+            .as_ref()
+            .filter(|challenge| challenge.expires_at > Instant::now())
+            .map(|challenge| challenge.code.clone())
     }
 }
 
@@ -419,7 +447,7 @@ mod tests {
             Err(PairingError::Invalid(PairFailReason::InvalidCode))
         ));
         assert_eq!(
-            pm.challenges[&ch.challenge_id].attempts_left,
+            pm.challenge.as_ref().unwrap().attempts_left,
             MAX_ATTEMPTS - 1
         );
     }
@@ -456,7 +484,7 @@ mod tests {
             r,
             Err(PairingError::Invalid(PairFailReason::Expired))
         ));
-        assert_eq!(pm.challenges[&ch.challenge_id].attempts_left, MAX_ATTEMPTS);
+        assert_eq!(pm.challenge.as_ref().unwrap().attempts_left, MAX_ATTEMPTS);
     }
 
     #[test]
@@ -468,26 +496,23 @@ mod tests {
     }
 
     #[test]
-    fn simultaneous_challenges_are_bound_to_their_sessions() {
+    fn newer_challenge_invalidates_previous_one() {
         let mut pm = PairingManager::new();
         let first = pm.start_challenge("session-1", "Pixel 8", DEFAULT_PIN_TTL);
         let second = pm.start_challenge("session-2", "Galaxy S23", DEFAULT_PIN_TTL);
 
-        // Conexões diferentes não invalidam o desafio umas das outras.
-        assert_eq!(pm.challenges.len(), 2);
         assert_eq!(pm.active_pin().as_deref(), Some(second.code.as_str()));
+        assert!(matches!(
+            pm.submit(
+                "session-1",
+                &first.challenge_id,
+                &first.nonce,
+                &first.code,
+                "android",
+            ),
+            Err(PairingError::Invalid(PairFailReason::Expired))
+        ));
 
-        // O primeiro desafio continua válido na sua própria sessão.
-        let r = pm.submit(
-            "session-1",
-            &first.challenge_id,
-            &first.nonce,
-            &first.code,
-            "android",
-        );
-        assert!(r.is_ok());
-
-        // O segundo desafio também permanece isolado e pareia normalmente.
         let dev_id = pm
             .submit(
                 "session-2",
@@ -516,7 +541,12 @@ mod tests {
             result,
             Err(PairingError::Invalid(PairFailReason::InvalidCode))
         ));
-        assert!(pm.challenges.contains_key(&challenge.challenge_id));
+        assert_eq!(
+            pm.challenge
+                .as_ref()
+                .map(|active| active.challenge_id.as_str()),
+            Some(challenge.challenge_id.as_str())
+        );
     }
 
     #[test]
@@ -558,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_propagates_write_error_and_rolls_back() {
+    fn trust_does_not_publish_failed_commit() {
         let path = std::env::temp_dir().join(format!("trusted-write-error-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         let mut pm = PairingManager::new_with_store(&path).unwrap();
@@ -570,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_propagates_write_error_and_rolls_back() {
+    fn submit_does_not_publish_or_consume_on_failed_commit() {
         let path =
             std::env::temp_dir().join(format!("trusted-submit-error-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
@@ -588,11 +618,12 @@ mod tests {
             )
             .is_err());
         assert!(pm.trusted_devices().is_empty());
+        assert_eq!(pm.active_pin().as_deref(), Some(challenge.code.as_str()));
         let _ = std::fs::remove_dir(&path);
     }
 
     #[test]
-    fn untrust_propagates_write_error_and_rolls_back() {
+    fn untrust_does_not_publish_failed_commit() {
         let path =
             std::env::temp_dir().join(format!("trusted-untrust-error-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
@@ -651,6 +682,26 @@ mod tests {
             .map(|d| d.id.as_str())
             .collect();
         assert_eq!(ids, vec!["new", "old"]);
+    }
+
+    #[test]
+    fn trusted_store_has_single_process_owner() {
+        let dir = std::env::temp_dir().join(format!(
+            "clipsync-store-lock-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("trusted.toml");
+        let owner = TrustedStoreLock::try_acquire(&path).unwrap();
+
+        assert!(matches!(
+            TrustedStoreLock::try_acquire(&path),
+            Err(crate::Error::StoreBusy(busy_path)) if busy_path == path
+        ));
+
+        drop(owner);
+        assert!(TrustedStoreLock::try_acquire(&path).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

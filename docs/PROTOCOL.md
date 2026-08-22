@@ -67,7 +67,7 @@ CLIENT                            SERVER
 ```
 
 > O PIN de 6 dígitos é gerado pelo servidor e **exibido localmente no
-> daemon** (bandeja/tray ou `clipsyncd --show-pin`). A resposta de
+> daemon** (bandeja/tray ou log do processo em foreground). A resposta de
 > `pair_challenge` carrega apenas `challenge_id`, `expires_at` e `nonce`
 > — **o PIN nunca atravessa o fio**.
 
@@ -78,19 +78,22 @@ CLIENT                            SERVER
 2. Se `device.id` está na lista de confiados do servidor, o pareamento
    é pulado e `pair_ok` é enviado imediatamente.
 3. Se `device.id` é `null` (ou desconhecido), o servidor gera um PIN de
-   6 dígitos, o **exibe localmente no daemon** (bandeja/tray ou
-   `clipsyncd --show-pin`) e envia `pair_challenge` com `challenge_id`,
+   6 dígitos, o **exibe localmente no daemon** (bandeja/tray ou log) e envia
+   `pair_challenge` com `challenge_id`,
    `nonce` e `expires_at`. O client **não** recebe o PIN — ele é
    digitado pelo usuário a partir da exibição no daemon. O desafio fica
    associado à conexão que recebeu o `pair_challenge`; o nome anunciado no
    `hello` não é uma chave de autenticação.
-4. `pair_submit` com PIN correto (digitado) + `challenge_id` + nonce
+4. Existe no máximo um desafio ativo no daemon. Um novo `hello` de device
+   desconhecido substitui o desafio anterior para que o único PIN exibido no
+   tray seja sempre o único PIN aceito.
+5. `pair_submit` com PIN correto (digitado) + `challenge_id` + nonce
    corretos → `pair_ok`. PIN errado → `pair_fail` e o servidor fecha a
    conexão.
-5. O `device_id` recebido em `pair_ok` **deve** ser persistido pelo
+6. O `device_id` recebido em `pair_ok` **deve** ser persistido pelo
    client (SharedPreferences) e enviado em `hello` nas próximas
    conexões.
-6. Se um `device_id` já tem uma sessão ativa e reconecta, a **nova**
+7. Se um `device_id` já tem uma sessão ativa e reconecta, a **nova**
    sessão substitui a antiga. A sessão antiga recebe `error` com
    código `superseded` e para de receber broadcasts; o client deve
    fechar a conexão ao recebê-lo.

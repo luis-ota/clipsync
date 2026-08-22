@@ -88,10 +88,11 @@ digitar IP.
 
 ### Pareamento
 
-Ao se conectar pela primeira vez, o celular vê um **PIN de 6 dígitos**
-gerado pelo daemon. Você digita no app, e o device é adicionado à lista
+Ao se conectar pela primeira vez, o daemon exibe um **PIN de 6 dígitos**
+no tray ou log. Você o digita no app, e o device é adicionado à lista
 de pares confiáveis (persistido em `~/.config/clipsync/trusted.toml`).
-Conexões subsequentes do mesmo device são aceitas direto.
+Conexões subsequentes do mesmo device são aceitas direto. O daemon mantém um
+único desafio ativo, de acordo com o único PIN apresentado no tray.
 
 ## Instalação (daemon)
 
@@ -134,12 +135,16 @@ clipsyncd show-pin
 # Listar devices pareados
 clipsyncd list-peers
 
-# Remover um peer
+# Remover um peer (operação offline; pare o daemon antes)
 clipsyncd untrust <device-id>
 
 # Mostrar endereço de descoberta
 clipsyncd show-address
 ```
+
+As gravações de `config.toml` e `trusted.toml` são atômicas. Enquanto está
+ativo, o daemon possui exclusivamente o trusted store; uma tentativa offline
+de `untrust` falha em vez de competir com o estado em memória.
 
 ## Configuração
 
