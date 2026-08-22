@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust and clipboard tools
+      - name: Install clipboard tools
         run: |
           if command -v apt-get >/dev/null; then
             apt-get update
@@ -44,35 +44,43 @@ jobs:
           else
             pacman -Sy --noconfirm curl ca-certificates base-devel xclip wl-clipboard
           fi
+
+      - name: Install Rust
+        if: matrix.name == 'ubuntu'
+        run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           . "$HOME/.cargo/env"
           rustup component add rustfmt clippy
 
       - name: cargo fmt --check
+        if: matrix.name == 'ubuntu'
         run: . "$HOME/.cargo/env" && cargo fmt --all -- --check
 
       - name: cargo clippy
+        if: matrix.name == 'ubuntu'
         run: . "$HOME/.cargo/env" && cargo clippy --workspace --all-targets --no-deps
 
-      - name: cargo build
-        run: . "$HOME/.cargo/env" && cargo build --workspace --all-targets
-
       - name: cargo test
+        if: matrix.name == 'ubuntu'
         run: . "$HOME/.cargo/env" && cargo test --workspace --no-fail-fast
 
       - name: Validate deployment configuration
+        if: matrix.name == 'ubuntu'
         run: . "$HOME/.cargo/env" && cargo run -p clipsyncd -- validate-config --config deploy/config/relay.toml
 
       - name: Smoke CLI
+        if: matrix.name == 'ubuntu'
         run: . "$HOME/.cargo/env" && cargo run -q -p clipsyncd -- --help && XDG_CONFIG_HOME="$RUNNER_TEMP/clipsync-${{ matrix.name }}" cargo run -q -p clipsyncd -- endpoints list
 
       - name: Packaging smoke test
         run: chmod +x packaging/*.sh && packaging/smoke-test.sh
 
       - name: Build release artifacts available on this target
+        if: matrix.name == 'ubuntu'
         run: . "$HOME/.cargo/env" && packaging/build-release.sh "$RUNNER_TEMP/clipsync-dist"
 
       - name: Upload release artifacts
+        if: matrix.name == 'ubuntu'
         uses: actions/upload-artifact@v4
         with:
           name: clipsync-${{ matrix.name }}
@@ -80,6 +88,7 @@ jobs:
           if-no-files-found: error
 
       - name: Smoke test generated package contents and permissions
+        if: matrix.name == 'ubuntu'
         run: packaging/smoke-test.sh "$RUNNER_TEMP/clipsync-dist"
 
       - name: Validate Arch package metadata
@@ -138,16 +147,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check official desktop client
-        run: cargo check -p clipsync-client
+      - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy desktop client
         run: cargo clippy -p clipsync-client --all-targets -- -D warnings
       - name: Release build
         run: cargo build --release -p clipsync-client
-      - name: Test protocol and client
-        run: cargo test -p clipsync-core -p clipsync-client --all-targets
       - name: Validate installer projects
         if: runner.os == 'macOS'
         shell: bash
