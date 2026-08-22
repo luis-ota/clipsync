@@ -68,6 +68,8 @@ class ClipboardWatcher(
     fun start() = clipboard.addPrimaryClipChangedListener(this)
     fun stop() = clipboard.removePrimaryClipChangedListener(this)
 
+    fun sendCurrentClipboard() = emitCurrentClip()
+
     override fun onPrimaryClipChanged() {
         pendingNotification?.cancel()
         pendingNotification = scope.launch {

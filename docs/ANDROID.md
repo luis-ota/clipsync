@@ -28,8 +28,9 @@ app/src/main/java/com/clipsync/android/
 │   ├── WebSocketClient.kt conexão + keepalive + reconnect
 │   └── MessageSerializer.kt (kotlinx.serialization)
 └── service/
-    ├── ClipboardSyncService.kt (foreground service)
+    ├── ClipboardSyncService.kt (foreground service, actions de notificacao)
     └── ClipboardWatcher.kt   ContentObserver no clipboard
+    └── ClipSyncInputMethodService.kt (IME para inserir o ultimo item remoto)
 ```
 
 ## Fluxo de vida do app
@@ -80,6 +81,9 @@ data class DeviceInfo(
   e ler `clipboard.primaryClip`. Para texto: `clipData.getItemAt(0).text`.
   Para imagem: `item.uri` → `contentResolver` → bytes → base64.
 - **Receber**: gravar `ClipData.newPlainText(...)` ou `newUri(...)`.
+- **IME**: o teclado ClipSync aparece nas configuracoes de teclados e oferece
+  `Colar do PC`; ele insere somente texto recebido e explicitamente acionado pelo
+  usuario via `InputConnection`.
 - **Anti-eco**: manter uma fila limitada de hashes de escritas remotas com TTL.
   Cada callback consome somente sua entrada; callbacks ausentes expiram sem
   suprimir indefinidamente uma cópia legítima futura.
@@ -119,3 +123,22 @@ em redes Wi-Fi (multicast bloqueado por padrão no Android).
 - `ProtocolSerializerTest`: round-trip de todas as mensagens JSON.
 - `HandshakeTest`: mock de servidor WebSocket local → hello/pair_ok.
 - `ReconnectTest`: server derruba conexão → backoff → reconnect.
+
+## Acoes, pairing e benchmark
+
+A notificacao persistente oferece `Copiar do PC`, `Enviar clipboard` e
+`Reconectar`. Os intents sao explicitos para o servico nao exportado. O ultimo
+item remoto fica apenas em memoria como resumo na UI; o payload completo fica
+disponivel ao servico enquanto a sessao estiver viva.
+
+O deep-link `clipsync://pair?server_id=<id>&pin=<6-digitos>` seleciona o servidor
+e, quando presente, submete o PIN depois da validacao local. O PIN continua
+sujeito ao desafio e expiracao do protocolo.
+
+O teste `ProtocolBenchmarkTest` (`./gradlew testDebugUnitTest`) faz um smoke
+benchmark automatizado de codec/hash em JVM. Ele detecta regressao grosseira,
+mas nao mede latencia, bateria ou throughput de um aparelho Android. Para
+perfil real, use Android Studio Profiler em build debug e compare o trace de
+`ClipboardWatcher.emitCurrentClip` e `ClipboardSyncService.handlePayload` em
+um dispositivo; nenhum numero de host deve ser interpretado como medicao
+fisica Android.

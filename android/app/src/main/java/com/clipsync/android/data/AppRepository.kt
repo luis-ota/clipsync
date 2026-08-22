@@ -45,7 +45,10 @@ data class AppUiState(
     val status: ConnectionStatus = ConnectionStatus.DISCOVERING,
     val statusDetail: String = "Procurando servidores na rede local",
     val pinExpiresAt: Long? = null,
+    val lastRemoteItem: LastRemoteItem? = null,
 )
+
+data class LastRemoteItem(val mime: String, val preview: String, val receivedAt: Long)
 
 object AppRepository {
     private val mutableState = MutableStateFlow(AppUiState())
@@ -87,6 +90,17 @@ object AppRepository {
     fun updateStatus(status: ConnectionStatus, detail: String, expiresAt: Long? = null) {
         mutableState.update { it.copy(status = status, statusDetail = detail, pinExpiresAt = expiresAt) }
     }
+
+    fun recordRemote(message: Message) {
+        val item = when (message) {
+            is Message.ClipboardText -> LastRemoteItem(message.mime, message.content.take(120), System.currentTimeMillis())
+            is Message.ClipboardHtml -> LastRemoteItem("text/html", (message.alt ?: message.html).take(120), System.currentTimeMillis())
+            is Message.ClipboardImage -> LastRemoteItem(message.mime, "Imagem recebida", System.currentTimeMillis())
+            else -> return
+        }
+        mutableState.update { it.copy(lastRemoteItem = item) }
+    }
+
     fun alternateTarget(current: DiscoveredServer): DiscoveredServer? {
         val routes = mutableState.value.servers
         if (routeMachine.current()?.id != current.id) {

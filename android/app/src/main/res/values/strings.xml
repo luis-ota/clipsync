@@ -1,4 +1,8 @@
 <resources>
     <string name="app_name">ClipSync</string>
     <string name="notification_channel_name">Sincronizacao do clipboard</string>
+    <string name="ime_subtype">Português</string>
+    <string name="notification_copy_from_pc">Copiar do PC</string>
+    <string name="notification_send_clipboard">Enviar clipboard</string>
+    <string name="notification_reconnect">Reconectar</string>
 </resources>
