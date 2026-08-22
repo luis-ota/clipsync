@@ -206,6 +206,28 @@ desconectado.
 
 ## Segurança (v1)
 
+### Contrato de relay (#75/#76)
+
+O núcleo expõe `clipsync_core::auth` para relays e clientes: `ServerId`,
+`UserId`, `GroupId`, `SessionId` e `Principal` são tipos distintos e
+serializáveis; uma `SessionCredential` contém um token aleatório de 256 bits
+emitido após o pareamento pela API de autenticação. O token é bearer e só é
+válido sobre o transporte TLS. Relays devem autenticar a sessão antes de
+aceitar clipboard.
+
+O `RelayEnvelope` exige `source` igual ao device autenticado, uma sequência
+estritamente crescente por `SessionId`, e autorização de `source` e
+`destination` no mesmo `GroupId`. A autorização rejeita grupo desconhecido,
+cross-group forwarding, destino não membro, source forjado e replay. Depois
+da validação, `origin` é sobrescrito pelo source autenticado.
+
+O protocolo v1 não adiciona E2E retroativamente: os clientes atuais não
+negociam chaves nem entendem um envelope cifrado. O transporte TLS fornece
+confidencialidade hop-to-hop, não E2E contra o relay. A extensão E2E deve ser
+uma mudança de compatibilidade (negociação de chave efêmera autenticada,
+AEAD, nonce/contador e rotação) antes de ser ativada no wire; registrar como
+issue separado, sem tratar o bearer token ou TLS como E2E.
+
 - O transporte padrão é `wss://`. O daemon gera uma identidade autoassinada
   persistente (`tls-cert.der`/`tls-key.der`, chave com modo 0600). A confiança
   usa o fingerprint SHA-256 do certificado DER, não hostname, IP ou nome mDNS.
