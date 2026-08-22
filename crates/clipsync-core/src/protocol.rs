@@ -189,6 +189,10 @@ pub enum Message {
     PairOk {
         /// ID permanente do device. Persistir no client.
         device_id: DeviceId,
+        /// Identidade estável do daemon. Clients usam esta chave para
+        /// persistir o `device_id` sem vinculá-lo a host, porta ou nome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_id: Option<DeviceId>,
         /// ID único desta sessão de conexão (não persistente).
         session_id: String,
         /// Nome do servidor (PC), para exibir no client.
@@ -358,6 +362,31 @@ mod tests {
         assert_eq!(json["type"], "pair_submit");
         assert_eq!(json["code"], "834921");
         assert_eq!(json["challenge_id"], "ch-1");
+    }
+
+    #[test]
+    fn pair_ok_carries_stable_server_identity() {
+        let message = Message::PairOk {
+            device_id: DeviceId::from("client-id"),
+            server_id: Some(DeviceId::from("server-id")),
+            session_id: "session-id".into(),
+            server_name: "desktop".into(),
+            capabilities: Capabilities::default(),
+        };
+        let json = serde_json::to_value(message).unwrap();
+        assert_eq!(json["server_id"], "server-id");
+    }
+
+    #[test]
+    fn pair_ok_from_legacy_server_remains_decodable() {
+        let json = r#"{
+            "type":"pair_ok","device_id":"client-id","session_id":"session-id",
+            "server_name":"desktop","capabilities":{}
+        }"#;
+        match serde_json::from_str::<Message>(json).unwrap() {
+            Message::PairOk { server_id, .. } => assert!(server_id.is_none()),
+            other => panic!("esperava pair_ok, recebeu {}", other.type_name()),
+        }
     }
 
     #[test]

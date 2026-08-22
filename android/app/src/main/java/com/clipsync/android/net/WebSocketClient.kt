@@ -3,7 +3,11 @@ package com.clipsync.android.net
 import com.clipsync.android.data.DiscoveredServer
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
@@ -25,7 +29,6 @@ class ReconnectPolicy(private val initialMillis: Long = 1_000, private val maxim
 }
 
 class WebSocketClient(
-    private val scope: CoroutineScope,
     private val callbacks: Callbacks,
     private val client: OkHttpClient = OkHttpClient.Builder()
         .pingInterval(30, TimeUnit.SECONDS)
@@ -34,65 +37,139 @@ class WebSocketClient(
     private val policy: ReconnectPolicy = ReconnectPolicy(),
 ) {
     interface Callbacks {
-        fun onConnecting(delayMillis: Long?)
-        fun onOpen()
-        fun onMessage(payload: String)
-        fun onDisconnected(reason: String)
+        fun onConnecting(generation: Long, delayMillis: Long?)
+        fun onOpen(generation: Long)
+        fun onMessage(generation: Long, payload: String)
+        fun onDisconnected(generation: Long, reason: String)
+        fun onSendFailed(generation: Long)
     }
+
+    private sealed interface Event {
+        data class Connect(val generation: Long, val server: DiscoveredServer) : Event
+        data class Send(val generation: Long, val payload: String) : Event
+        data object Disconnect : Event
+        data object Shutdown : Event
+        data class Opened(val generation: Long, val socket: WebSocket) : Event
+        data class Message(val generation: Long, val socket: WebSocket, val payload: String) : Event
+        data class Failed(val generation: Long, val socket: WebSocket, val reason: String) : Event
+        data class Retry(val generation: Long) : Event
+    }
+
+    private val events = Channel<Event>(Channel.UNLIMITED)
+    private val actorScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var target: DiscoveredServer? = null
     private var socket: WebSocket? = null
     private var reconnectJob: Job? = null
     private var attempt = 0
-    private var generation = 0
+    private var generation = -1L
 
-    fun connect(server: DiscoveredServer) {
-        disconnect()
-        target = server
-        generation++
-        attempt = 0
-        open(generation)
-    }
-    fun send(payload: String): Boolean = socket?.send(payload) == true
-    fun disconnect() {
-        target = null
-        generation++
-        reconnectJob?.cancel()
-        reconnectJob = null
-        socket?.close(1000, "client disconnect")
-        socket = null
-    }
-    private fun open(connectionGeneration: Int) {
-        val server = target ?: return
-        callbacks.onConnecting(null)
-        val request = Request.Builder().url("ws://${server.host}:${server.port}/ws").build()
-        socket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (connectionGeneration != generation) {
-                    webSocket.close(1000, "stale")
-                    return
+    init {
+        actorScope.launch {
+            for (event in events) {
+                if (event == Event.Shutdown) {
+                    target = null
+                    closeCurrent("client shutdown")
+                    events.close()
+                    break
                 }
+                reduce(event)
+            }
+            actorScope.cancel()
+        }
+    }
+
+    fun connect(server: DiscoveredServer, generation: Long) {
+        events.trySend(Event.Connect(generation, server))
+    }
+
+    fun send(payload: String, generation: Long) {
+        events.trySend(Event.Send(generation, payload))
+    }
+
+    fun disconnect() { events.trySend(Event.Disconnect) }
+    fun shutdown() { events.trySend(Event.Shutdown) }
+
+    private fun reduce(event: Event) {
+        when (event) {
+            is Event.Connect -> {
+                closeCurrent("new session")
+                generation = event.generation
+                target = event.server
                 attempt = 0
-                callbacks.onOpen()
+                open()
+            }
+            is Event.Send -> if (event.generation == generation) {
+                val current = socket
+                if (current == null || !current.send(event.payload)) {
+                    callbacks.onSendFailed(generation)
+                    if (current != null) {
+                        current.cancel()
+                        fail(current, "fila de envio WebSocket cheia")
+                    }
+                }
+            }
+            Event.Disconnect -> {
+                generation++
+                target = null
+                closeCurrent("client disconnect")
+            }
+            Event.Shutdown -> Unit
+            is Event.Opened -> if (isCurrent(event.generation, event.socket)) {
+                attempt = 0
+                callbacks.onOpen(generation)
+            } else {
+                event.socket.close(1000, "stale")
+            }
+            is Event.Message -> if (isCurrent(event.generation, event.socket)) {
+                callbacks.onMessage(generation, event.payload)
+            }
+            is Event.Failed -> if (isCurrent(event.generation, event.socket)) fail(event.socket, event.reason)
+            is Event.Retry -> if (event.generation == generation && target != null) open()
+        }
+    }
+
+    private fun open() {
+        val server = target ?: return
+        val connectionGeneration = generation
+        callbacks.onConnecting(connectionGeneration, null)
+        val request = Request.Builder().url("ws://${server.host}:${server.port}/ws").build()
+        val listener = object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                events.trySend(Event.Opened(connectionGeneration, webSocket))
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
-                if (connectionGeneration == generation) callbacks.onMessage(text)
+                events.trySend(Event.Message(connectionGeneration, webSocket, text))
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                failed(connectionGeneration, reason.ifBlank { "conexao encerrada" })
+                events.trySend(Event.Failed(connectionGeneration, webSocket, reason.ifBlank { "conexao encerrada" }))
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                failed(connectionGeneration, t.message ?: "falha de rede")
+                events.trySend(Event.Failed(connectionGeneration, webSocket, t.message ?: "falha de rede"))
             }
-        })
-    }
-    private fun failed(connectionGeneration: Int, reason: String) {
-        if (connectionGeneration != generation || target == null || reconnectJob?.isActive == true) return
-        callbacks.onDisconnected(reason)
-        val wait = policy.delayMillis(attempt++)
-        callbacks.onConnecting(wait)
-        reconnectJob = scope.launch {
-            delay(wait)
-            if (connectionGeneration == generation && target != null) open(connectionGeneration)
         }
+        socket = client.newWebSocket(request, listener)
+    }
+
+    private fun fail(failedSocket: WebSocket, reason: String) {
+        if (failedSocket !== socket || target == null || reconnectJob?.isActive == true) return
+        socket = null
+        callbacks.onDisconnected(generation, reason)
+        val wait = policy.delayMillis(attempt++)
+        callbacks.onConnecting(generation, wait)
+        val retryGeneration = generation
+        reconnectJob = actorScope.launch {
+            delay(wait)
+            events.send(Event.Retry(retryGeneration))
+        }
+    }
+
+    private fun isCurrent(eventGeneration: Long, eventSocket: WebSocket): Boolean =
+        eventGeneration == generation && eventSocket === socket
+
+    private fun closeCurrent(reason: String) {
+        reconnectJob?.cancel()
+        reconnectJob = null
+        socket?.close(1000, reason)
+        socket = null
     }
 }

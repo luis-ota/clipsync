@@ -1,12 +1,44 @@
 package com.clipsync.android.data
 
 import android.content.Context
+import java.util.Base64
 
 class DeviceStore(context: Context) {
     private val preferences = context.getSharedPreferences("clipsync", Context.MODE_PRIVATE)
-    var deviceId: String?
-        get() = preferences.getString("device_id", null)
-        set(value) { preferences.edit().putString("device_id", value).apply() }
+    private val registry = DeviceIdentityRegistry(object : DeviceIdentityPersistence {
+        override fun get(key: String): String? = preferences.getString(key, null)
+        override fun put(key: String, value: String) { preferences.edit().putString(key, value).apply() }
+        override fun claimLegacy(key: String): String? {
+            val legacy = preferences.getString(LEGACY_KEY, null) ?: return null
+            preferences.edit().putString(key, legacy).remove(LEGACY_KEY).commit()
+            return legacy
+        }
+    })
+
+    fun deviceIdFor(serverId: String): String? = registry.deviceIdFor(serverId)
+    fun save(serverId: String, deviceId: String) = registry.save(serverId, deviceId)
+
+    private companion object { const val LEGACY_KEY = "device_id" }
+}
+
+internal interface DeviceIdentityPersistence {
+    fun get(key: String): String?
+    fun put(key: String, value: String)
+    fun claimLegacy(key: String): String?
+}
+
+internal class DeviceIdentityRegistry(private val persistence: DeviceIdentityPersistence) {
+    @Synchronized fun deviceIdFor(serverId: String): String? {
+        val key = key(serverId)
+        return persistence.get(key) ?: persistence.claimLegacy(key)
+    }
+
+    @Synchronized fun save(serverId: String, deviceId: String) = persistence.put(key(serverId), deviceId)
+
+    private fun key(serverId: String): String {
+        val encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(serverId.toByteArray())
+        return "device_id.$encoded"
+    }
 }
 
 sealed interface ProtocolAction {

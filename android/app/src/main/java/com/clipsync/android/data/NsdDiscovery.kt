@@ -6,7 +6,7 @@ import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 
 @Suppress("DEPRECATION")
-class NsdDiscovery(context: Context, private val onChanged: (List<DiscoveredServer>) -> Unit) {
+class NsdDiscovery(context: Context, private val onChanged: (DiscoverySnapshot) -> Unit) {
     private val nsdManager = context.getSystemService(NsdManager::class.java)
     private val multicastLock = context.getSystemService(WifiManager::class.java)
         .createMulticastLock("clipsync-mdns").apply { setReferenceCounted(false) }
@@ -14,31 +14,22 @@ class NsdDiscovery(context: Context, private val onChanged: (List<DiscoveredServ
     private val pendingResolutions = ArrayDeque<NsdServiceInfo>()
     private var running = false
     private var resolving = false
-    private val listener = object : NsdManager.DiscoveryListener {
-        override fun onDiscoveryStarted(serviceType: String) = Unit
-        override fun onDiscoveryStopped(serviceType: String) = Unit
-        override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) { stop() }
-        override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) { running = false }
-        override fun onServiceFound(info: NsdServiceInfo) {
-            if (info.serviceType.startsWith(SERVICE_TYPE) &&
-                pendingResolutions.none { it.serviceName == info.serviceName }
-            ) {
-                pendingResolutions.addLast(info)
-                resolveNext()
-            }
-        }
-        override fun onServiceLost(info: NsdServiceInfo) {
-            servers.remove(info.serviceName)
-            onChanged(servers.values.toList())
-        }
-    }
+    private var epoch = 0L
+    private var listener: NsdManager.DiscoveryListener? = null
 
     fun start() {
         if (running) return
         running = true
+        epoch++
+        val currentEpoch = epoch
+        servers.clear()
+        pendingResolutions.clear()
+        resolving = false
+        onChanged(DiscoverySnapshot(currentEpoch, emptyList()))
+        val currentListener = listener(currentEpoch).also { listener = it }
         if (!multicastLock.isHeld) multicastLock.acquire()
         try {
-            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, currentListener)
         } catch (_: RuntimeException) {
             running = false
             if (multicastLock.isHeld) multicastLock.release()
@@ -46,43 +37,77 @@ class NsdDiscovery(context: Context, private val onChanged: (List<DiscoveredServ
     }
     fun restart() { stop(); start() }
     fun stop() {
-        if (running) try { nsdManager.stopServiceDiscovery(listener) } catch (_: RuntimeException) { }
+        val currentListener = listener
+        if (running && currentListener != null) try {
+            nsdManager.stopServiceDiscovery(currentListener)
+        } catch (_: RuntimeException) { }
         running = false
+        epoch++
+        listener = null
         pendingResolutions.clear()
+        resolving = false
         if (multicastLock.isHeld) multicastLock.release()
     }
-    private fun resolveNext() {
+    private fun listener(listenerEpoch: Long) = object : NsdManager.DiscoveryListener {
+        override fun onDiscoveryStarted(serviceType: String) = Unit
+        override fun onDiscoveryStopped(serviceType: String) = Unit
+        override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+            if (listenerEpoch == epoch) stop()
+        }
+        override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
+        override fun onServiceFound(info: NsdServiceInfo) {
+            if (running && listenerEpoch == epoch && info.serviceType.startsWith(SERVICE_TYPE) &&
+                pendingResolutions.none { it.serviceName == info.serviceName }
+            ) {
+                pendingResolutions.addLast(info)
+                resolveNext(listenerEpoch)
+            }
+        }
+        override fun onServiceLost(info: NsdServiceInfo) {
+            if (listenerEpoch != epoch) return
+            servers.remove(info.serviceName)
+            publish(listenerEpoch)
+        }
+    }
+    private fun resolveNext(resolveEpoch: Long) {
+        if (resolveEpoch != epoch) return
         if (!running || resolving) return
         val info = pendingResolutions.removeFirstOrNull() ?: return
         resolving = true
         try {
             nsdManager.resolveService(info, object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                if (resolveEpoch != epoch) return
                 resolving = false
-                resolveNext()
+                resolveNext(resolveEpoch)
             }
             override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                if (resolveEpoch != epoch) return
                 resolving = false
                 if (!running) return
                 val host = serviceInfo.host?.hostAddress ?: run {
-                    resolveNext()
+                    resolveNext(resolveEpoch)
                     return
                 }
                 val server = DiscoveredServer(
-                    id = serviceInfo.serviceName,
+                    serviceName = serviceInfo.serviceName,
+                    serverId = serviceInfo.attributes["server_id"]?.toString(Charsets.UTF_8),
                     name = serviceInfo.attributes["name"]?.toString(Charsets.UTF_8) ?: serviceInfo.serviceName,
                     host = host.substringBefore('%'),
                     port = serviceInfo.port,
                 )
-                servers[server.id] = server
-                onChanged(servers.values.toList())
-                resolveNext()
+                servers[serviceInfo.serviceName] = server
+                publish(resolveEpoch)
+                resolveNext(resolveEpoch)
             }
             })
         } catch (_: RuntimeException) {
             resolving = false
-            resolveNext()
+            resolveNext(resolveEpoch)
         }
+    }
+    private fun publish(publishEpoch: Long) {
+        if (publishEpoch == epoch) onChanged(DiscoverySnapshot(epoch, servers.values.toList()))
     }
     private companion object { const val SERVICE_TYPE = "_clipsync._tcp." }
 }

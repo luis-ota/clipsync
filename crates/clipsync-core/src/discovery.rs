@@ -16,6 +16,7 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
+use crate::protocol::DeviceId;
 use crate::SERVICE_TYPE;
 
 /// Instância única de descoberta mDNS por daemon.
@@ -60,7 +61,7 @@ impl Discovery {
     /// Retorna erro se não for possível determinar o IP local (por
     /// exemplo, sem conectividade de rede), evitando anunciar
     /// `127.0.0.1` que seria inacessível para outros hosts.
-    pub fn announce(&self, name: &str, port: u16) -> Result<()> {
+    pub fn announce(&self, name: &str, port: u16, server_id: &DeviceId) -> Result<()> {
         let instance = sanitize_instance(name);
         let host = format!("{instance}.local");
         let type_full = SERVICE_TYPE;
@@ -68,7 +69,10 @@ impl Discovery {
             .ok_or_else(|| Error::Config("não foi possível determinar o IP local IPv4".into()))?;
 
         let properties: HashMap<String, String> = [
+            ("name", name.to_owned()),
+            ("protocol", format!("v{}", crate::PROTOCOL_VERSION)),
             ("version", env!("CARGO_PKG_VERSION").to_owned()),
+            ("server_id", server_id.to_string()),
             ("platform", "linux".to_owned()),
             ("cap_text", "1".to_owned()),
             ("cap_image", "1".to_owned()),
