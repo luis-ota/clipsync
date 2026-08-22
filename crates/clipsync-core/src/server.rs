@@ -126,19 +126,22 @@ async fn ws_handler(
     if state.config.security.local_only && !is_local_address(peer_addr.ip()) {
         return (StatusCode::FORBIDDEN, "conexão remota bloqueada\n").into_response();
     }
-    ws.on_upgrade(move |socket| {
-        let addr = peer_addr.to_string();
-        debug!(peer = %addr, "WebSocket upgrade aceito");
-        let conn = crate::transport::Connection {
-            socket,
-            addr: peer_addr,
-            state: state.clone(),
-            config: state.config.clone(),
-        };
-        async move {
-            conn.run().await;
-        }
-    })
+    let max_message_size = state.config.clipboard.max_websocket_message_bytes();
+    ws.max_message_size(max_message_size)
+        .max_frame_size(max_message_size)
+        .on_upgrade(move |socket| {
+            let addr = peer_addr.to_string();
+            debug!(peer = %addr, "WebSocket upgrade aceito");
+            let conn = crate::transport::Connection {
+                socket,
+                addr: peer_addr,
+                state: state.clone(),
+                config: state.config.clone(),
+            };
+            async move {
+                conn.run().await;
+            }
+        })
 }
 
 /// Filtro de rede local implementável sem APIs de plataforma. Não valida

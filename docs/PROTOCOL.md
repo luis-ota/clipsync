@@ -146,6 +146,10 @@ O daemon aceita até 25 MiB (configurável em `max_image_bytes`). Clients que
 usam OkHttp e JSON/base64 devem aplicar o menor limite end-to-end: o Android
 reserva 8 KiB para o envelope e limita os bytes crus a 12 MiB menos essa
 reserva codificada, mantendo cada mensagem abaixo da fila de 16 MiB do OkHttp.
+No servidor, `max_message_size` e `max_frame_size` do WebSocket são calculados
+a partir de `max_image_bytes` e `max_text_bytes`, incluindo a inflação do
+base64, o escaping JSON e 8 KiB de envelope. Os limites específicos de cada
+payload continuam sendo validados depois do parsing.
 > Planejado v0.3: transferência via frames binários WebSocket com
 > hash + id de transferência, evitando base64 para arquivos grandes.
 
