@@ -13,6 +13,8 @@ import java.io.File
 import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -60,11 +62,20 @@ class ClipboardWatcher(
 ) : ClipboardManager.OnPrimaryClipChangedListener {
     private val clipboard = context.getSystemService(ClipboardManager::class.java)
     private val pendingEchoes = PendingEchoes()
+    private var pendingNotification: Job? = null
 
     fun start() = clipboard.addPrimaryClipChangedListener(this)
     fun stop() = clipboard.removePrimaryClipChangedListener(this)
 
     override fun onPrimaryClipChanged() {
+        pendingNotification?.cancel()
+        pendingNotification = scope.launch {
+            delay(DEBOUNCE_MILLIS)
+            emitCurrentClip()
+        }
+    }
+
+    private fun emitCurrentClip() {
         val origin = deviceId() ?: return
         val clip = try { clipboard.primaryClip } catch (_: SecurityException) { null } ?: return
         val item = clip.getItemAt(0)
@@ -147,6 +158,8 @@ class ClipboardWatcher(
     } catch (_: Exception) { null }
 
     companion object {
+        private const val DEBOUNCE_MILLIS = 300L
+
         fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
             .digest(bytes).joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }

@@ -1,7 +1,7 @@
 //! Estado compartilhado do servidor: conexões ativas, dispositivos
 //! pareados e broadcast para os peers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +55,8 @@ pub struct ServerState {
     pub config: crate::server::ServerConfig,
     pub pairing: Mutex<PairingManager>,
     pub peers: RwLock<HashMap<DeviceId, PeerHandle>>,
+    /// Hashes de clipboard enviados por sessão de peer.
+    sent_clipboard: Mutex<HashMap<String, HashSet<String>>>,
     /// Broadcast para a task de watcher de clipboard local.
     pub local_events: mpsc::Sender<crate::clipboard::ClipboardEvent>,
     /// Sinal de shutdown global.
@@ -79,6 +81,7 @@ impl ServerState {
             config,
             pairing: Mutex::new(pm),
             peers: RwLock::new(HashMap::new()),
+            sent_clipboard: Mutex::new(HashMap::new()),
             local_events: tx,
             shutdown: CancellationToken::new(),
         };
@@ -110,6 +113,10 @@ impl ServerState {
             }
         }
         map.insert(device_id.clone(), handle);
+        self.sent_clipboard
+            .lock()
+            .await
+            .insert(session_id, HashSet::new());
         info!(peer = %addr, device = %device_id, "peer conectado");
     }
 
@@ -125,6 +132,7 @@ impl ServerState {
             None
         };
         if let Some(handle) = &removed {
+            self.sent_clipboard.lock().await.remove(&handle.session_id);
             info!(peer = %handle.addr, device = %device_id, "peer desconectado");
         } else {
             debug!(device = %device_id, "detach ignorado: sessão já não está ativa");
@@ -149,7 +157,21 @@ impl ServerState {
         };
         let mut failed = 0;
         for peer in &peers {
-            if !peer.send(Arc::clone(&msg)) {
+            let should_send = if let Some(hash) = msg.clipboard_sha256() {
+                let mut sent = self.sent_clipboard.lock().await;
+                sent.get_mut(&peer.session_id)
+                    .map(|hashes| hashes.insert(hash.to_owned()))
+                    .unwrap_or(true)
+            } else {
+                true
+            };
+            if should_send && !peer.send(Arc::clone(&msg)) {
+                if let Some(hash) = msg.clipboard_sha256() {
+                    let mut sent = self.sent_clipboard.lock().await;
+                    if let Some(hashes) = sent.get_mut(&peer.session_id) {
+                        hashes.remove(hash);
+                    }
+                }
                 failed += 1;
             }
         }
@@ -320,5 +342,35 @@ mod tests {
 
         assert!(ServerState::new(crate::server::ServerConfig::default(), Some(&path)).is_err());
         let _ = std::fs::remove_dir(&path);
+    }
+
+    #[tokio::test]
+    async fn broadcast_deduplicates_clipboard_per_session() {
+        let config = crate::server::ServerConfig::default();
+        let (state, _rx) = ServerState::new(config, None).unwrap();
+        let state = Arc::new(state);
+        let (tx, mut rx) = mpsc::channel(4);
+        let peer = PeerHandle {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            device_id: DeviceId::from("peer"),
+            session_id: "session".into(),
+            name: "peer".into(),
+            tx,
+        };
+        state.add_peer(peer).await;
+        let msg = Arc::new(Message::ClipboardText {
+            mime: "text/plain".into(),
+            content: "same".into(),
+            origin: DeviceId::from("sender"),
+            sha256: "hash".into(),
+        });
+
+        state.broadcast_except(Arc::clone(&msg), None).await;
+        state.broadcast_except(msg, None).await;
+
+        assert!(rx.recv().await.is_some());
+        assert!(tokio::time::timeout(Duration::from_millis(20), rx.recv())
+            .await
+            .is_err());
     }
 }

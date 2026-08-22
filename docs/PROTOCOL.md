@@ -158,6 +158,16 @@ consulta os alvos anunciados pelo clipboard antes de ler e usa `xclip` com o
 MIME explícito ao escrever. `image/gif` e outros MIME de imagem não são
 sincronizados. O limite também é aplicado antes do broadcast local, além da
 validação das mensagens recebidas.
+O sender deduplica clipboard por `sha256` dentro de cada sessão de peer:
+uma cópia repetida não gera outro envio. Não há `ack` ou referência nova no
+protocolo; ao reconectar, o peer recebe novamente o primeiro conteúdo visto.
+O debounce do watcher é trailing e de 300 ms, portanto uma sequência local
+rápida envia apenas o último snapshot.
+
+Compressão e headers compartilhados não foram adicionados: o transporte atual
+não negocia `permessage-deflate`, e remover campos do handshake seria uma
+mudança de protocolo sem ganho medido. `cargo bench --bench perf` registra o
+tamanho JSON e o tempo de serialização para texto de 1 KiB e imagem de 1 MiB.
 
 ### HTML (rich text, v0.2)
 
