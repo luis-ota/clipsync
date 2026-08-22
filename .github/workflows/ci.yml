@@ -83,8 +83,8 @@ jobs:
         run: packaging/smoke-test.sh "$RUNNER_TEMP/clipsync-dist"
 
       - name: Validate Arch package metadata
-       if: matrix.name == 'arch'
-       working-directory: packaging
+        if: matrix.name == 'arch'
+        working-directory: packaging
         run: |
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
