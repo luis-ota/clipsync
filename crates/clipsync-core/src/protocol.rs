@@ -164,7 +164,10 @@ pub struct Capabilities {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
     /// Primeira mensagem enviada pelo cliente ao se conectar.
-    Hello { v: u16, device: DeviceInfo },
+    Hello {
+        v: u16,
+        device: DeviceInfo,
+    },
 
     /// Servidor responde com um desafio de pareamento. O PIN de 6
     /// dígitos é exibido localmente no daemon e nunca viaja no wire.
@@ -238,14 +241,45 @@ pub enum Message {
         origin: DeviceId,
     },
 
+    /// Metadata for a streamed binary clipboard/file transfer. Chunks follow
+    /// only after `TransferAccept`; this keeps Android file writes opt-in.
+    TransferOffer {
+        transfer_id: String,
+        mime: String,
+        name: Option<String>,
+        size: u64,
+        chunks: u32,
+        sha256: String,
+        file: bool,
+        origin: DeviceId,
+    },
+    TransferAccept {
+        transfer_id: String,
+    },
+    TransferReject {
+        transfer_id: String,
+        reason: String,
+    },
+    TransferComplete {
+        transfer_id: String,
+        sha256: String,
+    },
+
     /// Keepalive. Cliente e servidor devem responder com `pong`.
-    Ping { ts: i64 },
+    Ping {
+        ts: i64,
+    },
 
     /// Resposta ao ping.
-    Pong { ts: i64 },
+    Pong {
+        ts: i64,
+    },
 
     /// Erro genérico (ex: payload muito grande, capability não habilitada).
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 impl Message {
@@ -269,6 +303,10 @@ impl Message {
             Self::ClipboardText { .. } => "clipboard_text",
             Self::ClipboardImage { .. } => "clipboard_image",
             Self::ClipboardHtml { .. } => "clipboard_html",
+            Self::TransferOffer { .. } => "transfer_offer",
+            Self::TransferAccept { .. } => "transfer_accept",
+            Self::TransferReject { .. } => "transfer_reject",
+            Self::TransferComplete { .. } => "transfer_complete",
             Self::Ping { .. } => "ping",
             Self::Pong { .. } => "pong",
             Self::Error { .. } => "error",
@@ -292,7 +330,8 @@ impl Message {
         match &mut self {
             Self::ClipboardText { origin: o, .. }
             | Self::ClipboardImage { origin: o, .. }
-            | Self::ClipboardHtml { origin: o, .. } => *o = origin.clone(),
+            | Self::ClipboardHtml { origin: o, .. }
+            | Self::TransferOffer { origin: o, .. } => *o = origin.clone(),
             _ => {}
         }
         self

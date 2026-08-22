@@ -29,6 +29,7 @@ pub mod relay_crypto;
 pub mod server;
 pub mod state;
 pub mod tls;
+pub mod transfer;
 pub mod transport;
 
 pub use auth::{GroupId, Principal, ServerId, SessionCredential, SessionId, UserId};

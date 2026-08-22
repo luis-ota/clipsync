@@ -56,6 +56,15 @@ sealed interface Message {
     ) : Message
     @Serializable @SerialName("clipboard_html")
     data class ClipboardHtml(val html: String, val alt: String? = null, val sha256: String, val origin: String) : Message
+    @Serializable @SerialName("transfer_offer")
+    data class TransferOffer(
+        val transfer_id: String, val mime: String, val name: String? = null,
+        val size: Long, val chunks: Int, val sha256: String, val file: Boolean,
+        val origin: String,
+    ) : Message
+    @Serializable @SerialName("transfer_accept") data class TransferAccept(val transfer_id: String) : Message
+    @Serializable @SerialName("transfer_reject") data class TransferReject(val transfer_id: String, val reason: String) : Message
+    @Serializable @SerialName("transfer_complete") data class TransferComplete(val transfer_id: String, val sha256: String) : Message
     @Serializable @SerialName("ping") data class Ping(val ts: Long) : Message
     @Serializable @SerialName("pong") data class Pong(val ts: Long) : Message
     @Serializable @SerialName("error") data class Error(val code: String, val message: String) : Message

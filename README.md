@@ -7,7 +7,7 @@
 macOS ou Windows pela rede local. O daemon Linux suporta Wayland e X11; os
 clientes macOS/Windows usam as APIs nativas do sistema. Copiou no celular →
 cola no PC.
-Copiou no PC → cola no celular. Texto e imagens. Em tempo real.
+Copiou no PC → cola no celular. Texto, imagens e arquivos grandes em streaming bounded. Em tempo real.
 
 Inspirado em [KDE Connect](https://kdeconnect.kde.org/), mas com escopo
 cirúrgico: **só clipboard, e bem feito**.
@@ -38,7 +38,7 @@ cirúrgico: **só clipboard, e bem feito**.
 | App Android      | ✅ v0.1 — Kotlin + Compose, texto + imagem |
 | Cliente macOS/Windows | 🧪 cliente Rust mínimo oficial, texto + clipboard nativo |
 | Criptografia E2E | ✅ AES-256-GCM para payloads relay |
-| Sincronia de arquivos | ⏳ planejado para v0.3 |
+| Sincronia de arquivos | ✅ frames binários com hash, chunks e confirmação |
 
 ## Arquitetura
 
@@ -217,7 +217,7 @@ service_type = "_clipsync._tcp.local"
 sync_text = true
 sync_images = true
 sync_html = false          # v0.2
-sync_files = false         # v0.3
+sync_files = false         # oferta binária, confirmação no Android
 # Backend preferido: "wayland" | "x11" | "auto"
 backend = "auto"
 # Limite de tamanho (bytes) para imagens
@@ -276,7 +276,7 @@ Mensagens v0.1:
 
 - [ ] v0.1 — daemon Rust funcional (texto + imagem, mDNS, pairing)
 - [ ] v0.2 — criptografia E2E (Noise / AES-GCM), HTML rich text
-- [ ] v0.3 — transferência de arquivos, múltiplos PCs
+- [x] v0.3 — transferência de arquivos, múltiplos PCs
 - [x] v0.4 — app Android (Kotlin + Compose), foreground service
 - [ ] v0.5 — IME customizado para captura em background
 
