@@ -1,23 +1,25 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use clipsync_relay::{AuthError, RelayIdentity, RelayServer, TokenVerifier};
-
-#[derive(Debug)]
-struct EnvironmentVerifier;
-
-#[async_trait::async_trait]
-impl TokenVerifier for EnvironmentVerifier {
-    async fn verify(&self, _opaque_token: &str) -> Result<RelayIdentity, AuthError> {
-        Err(AuthError)
-    }
-}
+use clipsync_relay::{FileTokenProvider, RelayServer};
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-    let server = RelayServer::new(
+    let path = std::env::var_os("CLIPSYNC_RELAY_TOKEN_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/etc/clipsync/relay.tokens"));
+    let provider = match FileTokenProvider::from_path(&path) {
+        Ok(provider) => provider,
+        Err(error) => {
+            eprintln!("clipsync-relay: unable to load token provider: {error}");
+            std::process::exit(1);
+        }
+    };
+    let server = RelayServer::new_with_groups(
         clipsync_relay::RelayConfig::default(),
-        Arc::new(EnvironmentVerifier),
+        Arc::new(provider.clone()),
+        provider.authorizer(),
     );
     if let Err(error) = server.run().await {
         eprintln!("clipsync-relay: {error}");
