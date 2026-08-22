@@ -128,7 +128,9 @@ jobs:
         run: packaging/set-version.sh "${{ needs.metadata.outputs.version }}"
       - name: Build desktop client
         shell: bash
-        run: cargo build --locked --release -p clipsync-client
+        # The checked-in lockfile is generated on Linux and does not contain
+        # every platform-specific dependency selected by the macOS resolver.
+        run: cargo build --release -p clipsync-client
       - name: Stage desktop binary
         shell: bash
         run: |

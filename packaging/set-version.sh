@@ -21,7 +21,8 @@ sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$VERSION\"/" 
 sed -i -E "s/orElse\(\"[0-9]+\.[0-9]+\.[0-9]+\"\)/orElse(\"$VERSION\")/" \
   "$ROOT/android/app/build.gradle.kts"
 
-# Sync only local workspace package versions; do not resolve the dependency index.
+# Sync only local workspace package versions; platform-specific dependencies are
+# resolved by the release build for the target operating system.
 lock_tmp=$(mktemp)
 awk -v version="$VERSION" '
   /^name = "(clipsync-client|clipsync-core|clipsync-harness|clipsync-relay|clipsyncd)"$/ {
