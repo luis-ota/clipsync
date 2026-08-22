@@ -115,6 +115,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes).map_err(Error::Io)?;
+    #[cfg(unix)]
     std::fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o600))
         .map_err(Error::Io)?;
     std::fs::rename(tmp, path).map_err(Error::Io)

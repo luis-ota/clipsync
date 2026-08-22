@@ -103,5 +103,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check official desktop client
         run: cargo check -p clipsync-client
-      - name: Test protocol and client build
-        run: cargo test -p clipsync-core -p clipsync-client
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy desktop client
+        run: cargo clippy -p clipsync-client --all-targets -- -D warnings
+      - name: Release build
+        run: cargo build --release -p clipsync-client
+      - name: Test protocol and client
+        run: cargo test -p clipsync-core -p clipsync-client --all-targets
