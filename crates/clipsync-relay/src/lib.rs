@@ -423,16 +423,10 @@ impl RelayServer {
         groups: GroupAuthorizer,
     ) -> Self {
         assert!(config.queue_capacity > 0, "queue capacity must be positive");
-        let state = Arc::new(RelayState::with_groups_and_limits(
-            GroupAuthorizer::default(),
-            config.limits.clone(),
-        ));
+        let limits = config.limits.clone();
         Self {
             config,
-            state: Arc::new(RelayState::with_groups_and_limits(
-                groups,
-                config.limits.clone(),
-            )),
+            state: Arc::new(RelayState::with_groups_and_limits(groups, limits)),
             verifier,
             shutdown: CancellationToken::new(),
         }
