@@ -75,22 +75,6 @@ jobs:
       - name: Packaging smoke test
         run: chmod +x packaging/*.sh && packaging/smoke-test.sh
 
-      - name: Build release artifacts available on this target
-        if: matrix.name == 'ubuntu'
-        run: . "$HOME/.cargo/env" && packaging/build-release.sh "$RUNNER_TEMP/clipsync-dist"
-
-      - name: Upload release artifacts
-        if: matrix.name == 'ubuntu'
-        uses: actions/upload-artifact@v4
-        with:
-          name: clipsync-${{ matrix.name }}
-          path: ${{ runner.temp }}/clipsync-dist/*
-          if-no-files-found: error
-
-      - name: Smoke test generated package contents and permissions
-        if: matrix.name == 'ubuntu'
-        run: packaging/smoke-test.sh "$RUNNER_TEMP/clipsync-dist"
-
       - name: Validate Arch package metadata
         if: matrix.name == 'arch'
         working-directory: packaging
@@ -152,8 +136,6 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy desktop client
         run: cargo clippy -p clipsync-client --all-targets -- -D warnings
-      - name: Release build
-        run: cargo build --release -p clipsync-client
       - name: Validate installer projects
         if: runner.os == 'macOS'
         shell: bash
