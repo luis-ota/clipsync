@@ -213,12 +213,17 @@ impl ConnectionInner {
         let session_id = session.session_id().to_owned();
         let pairing_timeout = Duration::from_secs(self.config.security.pairing_timeout_secs);
         let pairing_deadline = tokio::time::Instant::now() + pairing_timeout;
-        let (challenge_id, nonce) = {
+        let (challenge_id, nonce, pin) = {
             let mut pm = self.state.pairing.lock().await;
             let ch = pm.start_challenge(&session_id, &device_name, pairing_timeout);
-            (ch.challenge_id.clone(), ch.nonce.clone())
+            (ch.challenge_id.clone(), ch.nonce.clone(), ch.code.clone())
         };
-        info!(peer = %self.addr, device = %device_name, "novo device: desafio de PIN enviado (PIN exibido no daemon)");
+        info!(
+            peer = %self.addr,
+            device = %device_name,
+            pin = %pin,
+            "novo device: digite este PIN no cliente"
+        );
         session.send(Message::PairChallenge {
             challenge_id,
             expires_at: chrono::Utc::now().timestamp()

@@ -2,7 +2,8 @@
 
 ## Visão geral
 
-Sincronização bidirecional de clipboard entre **Android** e **Linux**
+Sincronização bidirecional de clipboard entre **Android**, **Linux**, **macOS**
+e **Windows**
 (Arch) via LAN. Zero nuvem, zero servidor externo: o daemon roda no PC
 do usuário e os apps Android conectam via WebSocket.
 
@@ -121,8 +122,9 @@ pairing_timeout_secs = 120
 
 - `cargo test --workspace` — 22 testes (protocolo, pairing, state,
   healthz, broadcast).
-- CI (`.github/workflows/ci.yml`): `fmt` + `clippy -D warnings` +
-  `build` + `test` no Ubuntu.
+- O cliente desktop mínimo está em `crates/clipsync-client`; sua integração
+  nativa de texto é validada em runners macOS e Windows, não por compilação
+  nativa no Linux.
 
 ## Roadmap
 

@@ -14,7 +14,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 axum = { workspace = true, features = ["ws"] }
 mdns-sd = { workspace = true }
-wl-clipboard-rs = { workspace = true }
 arboard = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

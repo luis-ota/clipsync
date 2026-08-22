@@ -1,10 +1,12 @@
 # clipsync
 
-> **Clipboard universal entre Android e Linux via LAN.**
+> **Clipboard universal entre Android, Linux, macOS e Windows via LAN.**
 > Zero cloud. Zero conta. Zero servidor externo.
 
-`clipsync` sincroniza o clipboard entre o seu celular Android e o seu PC Linux
-(em Wayland ou X11) pela rede local. Copiou no celular → cola no PC.
+`clipsync` sincroniza o clipboard entre o seu celular Android e o seu PC Linux,
+macOS ou Windows pela rede local. O daemon Linux suporta Wayland e X11; os
+clientes macOS/Windows usam as APIs nativas do sistema. Copiou no celular →
+cola no PC.
 Copiou no PC → cola no celular. Texto e imagens. Em tempo real.
 
 Inspirado em [KDE Connect](https://kdeconnect.kde.org/), mas com escopo
@@ -34,6 +36,7 @@ cirúrgico: **só clipboard, e bem feito**.
 | Pareamento por PIN | ✅ 6 dígitos, mostrado no stdout/tray |
 | Múltiplos devices | ✅ |
 | App Android      | ✅ v0.1 — Kotlin + Compose, texto + imagem |
+| Cliente macOS/Windows | 🧪 cliente Rust mínimo oficial, texto + clipboard nativo |
 | Criptografia E2E | ⏳ planejado para v0.2 |
 | Sincronia de arquivos | ⏳ planejado para v0.3 |
 
@@ -48,6 +51,7 @@ clipsync/
 │   ├── clipsyncd/       # binário do daemon (CLI + tray)
 │   └── clipsync-harness/# client de referência e testes manuais
 ├── android/             # app Android (Kotlin + Compose)
+├── crates/clipsync-client/ # cliente desktop macOS/Windows (texto)
 ├── docs/                # arquitetura, protocolo
 └── .github/workflows/   # CI
 ```
@@ -55,6 +59,8 @@ clipsync/
 Docs detalhados: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/PROTOCOL.md`](docs/PROTOCOL.md) e
 [`docs/ANDROID.md`](docs/ANDROID.md) (guia do app).
+
+Cliente desktop: [`docs/DESKTOP-CLIENTS.md`](docs/DESKTOP-CLIENTS.md).
 
 Deploy operacional do `clipsyncd` headless: [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
@@ -126,6 +132,21 @@ requisitos em runtime; sem eles o daemon permanece em modo headless e o
 relay de rede continua disponível. O limite padrão de imagem é 25 MiB.
 
 ## Uso
+
+### macOS e Windows (cliente mínimo)
+
+O cliente oficial usa o clipboard nativo via `arboard` e sincroniza texto.
+Ele não oferece tray, descoberta mDNS, imagens ou persistência de identidade
+nesta primeira entrega. O PIN é informado explicitamente, e cada execução sem
+uma identidade persistida exige novo pareamento.
+
+```bash
+cargo run -p clipsync-client -- --pin 834921 ws://192.168.1.50:8765/ws
+```
+
+O binário é compilado e testado em runners macOS e Windows no workflow
+`desktop-clients`. O ambiente Linux deste repositório não afirma ter validado
+esses binários nativamente; a validação real depende do CI desses runners.
 
 ```bash
 # Rodar em foreground (stdout com logs e PIN)

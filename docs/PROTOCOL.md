@@ -1,7 +1,8 @@
 # Protocolo clipsync v1
 
 > Protocolo de aplicação trocado entre o daemon (`clipsyncd`) e os
-> clients (apps Android). Transporte padrão: **WebSocket sobre TLS** (RFC 6455 + RFC 8446).
+> clients (Android e clientes desktop). Transporte padrão: **WebSocket sobre
+> TLS** (RFC 6455 + RFC 8446).
 
 Todas as mensagens são **JSON** em frames de texto WebSocket, com um
 discriminador `type` e a versão do protocolo `v`.
