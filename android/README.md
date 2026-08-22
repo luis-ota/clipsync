@@ -26,7 +26,9 @@ O APK e gerado em `app/build/outputs/apk/debug/app-debug.apk`. Para instalar com
 4. No primeiro acesso, leia o PIN de 6 digitos exibido pelo daemon e informe-o no app.
 5. O `device_id` recebido em `pair_ok` fica em `SharedPreferences`; reconexoes futuras dispensam o PIN enquanto o computador confiar no aparelho.
 
-O protocolo v0.1 usa `ws://` sem TLS. Nao use em Wi-Fi publico ou outra rede nao confiavel.
+O cliente atual exige `wss://` e pinning pelo fingerprint anunciado no mDNS.
+Servidores v0.1 sem TLS são rejeitados; o modo `plaintext_legacy` existe apenas
+para migração controlada no daemon.
 
 ## Arquitetura
 

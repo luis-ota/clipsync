@@ -1,7 +1,7 @@
 # Protocolo clipsync v1
 
 > Protocolo de aplicação trocado entre o daemon (`clipsyncd`) e os
-> clients (apps Android). Transporte: **WebSocket** (RFC 6455).
+> clients (apps Android). Transporte padrão: **WebSocket sobre TLS** (RFC 6455 + RFC 8446).
 
 Todas as mensagens são **JSON** em frames de texto WebSocket, com um
 discriminador `type` e a versão do protocolo `v`.
@@ -28,7 +28,7 @@ um novo handshake.
 
 ```
 CLIENT                            SERVER
-  │  ws://192.168.1.50:8765/ws     │
+  │  wss://192.168.1.50:8765/ws     │
   │────────────────────────────────>│
   │  {"type":"hello","v":1,         │
   │   "device":{"name":"Pixel 8",   │
@@ -184,9 +184,18 @@ desconectado.
 {"type":"pong","ts":1234567890}
 ```
 
-## Segurança (v0.1)
+## Segurança (v1)
 
-- WebSocket **sem TLS** na v0.1 — tráfego apenas na LAN confiável.
+- O transporte padrão é `wss://`. O daemon gera uma identidade autoassinada
+  persistente (`tls-cert.der`/`tls-key.der`, chave com modo 0600). A confiança
+  usa o fingerprint SHA-256 do certificado DER, não hostname, IP ou nome mDNS.
+- O TXT mDNS publica `tls=1` e `tls_fingerprint=<64 hex>`. O Android exige os
+  dois campos, usa `wss://` e rejeita certificado cujo fingerprint não coincida.
+- `security.tls_fingerprint` opcional impede iniciar com uma identidade TLS
+  inesperada. Para rotação, substitua os arquivos e distribua o novo pin por
+  novo pareamento/registro mDNS.
+- `security.transport = "plaintext_legacy"` é compatibilidade explícita com
+  clients v0.1, não é o padrão, gera warning e não é aceito pelo Android atual.
 - Com `security.local_only = true` (padrão), o daemon aceita WebSocket
   apenas de endereços loopback, privados ou link-local. Isso é um filtro de
   endereço, não uma prova de mesma sub-rede ou de SSID.
@@ -197,14 +206,11 @@ desconectado.
   responde apenas com `challenge_id`, `nonce` e `expires_at`; o `code`
   digitado só aparece no `pair_submit` do próprio device que está sendo
   pareado.
-- Planejado v0.2: TLS com certificado auto-assinado + pinning, e
-  criptografia AES-GCM por mensagem (chave derivada do PIN + salt via
-  HKDF/PBKDF2).
 
 ## Endpoints
 
-- `ws://<host>:8765/ws` — websocket principal.
-- `http://<host>:8765/healthz` — healthcheck (200/ok).
+- `wss://<host>:8765/ws` — websocket principal, com pinning mDNS.
+- `https://<host>:8765/healthz` — healthcheck (200/ok), com o mesmo pin TLS.
 - `http://<host>:8765/` — info JSON do daemon (name, version).
 
 ## Detecção na LAN (mDNS)
@@ -221,3 +227,5 @@ Campos TXT:
 | `protocol`   | `v1`                        |
 | `port`       | Porta do websocket          |
 | `host`       | IP do daemon                |
+| `tls`        | `1` no transporte TLS obrigatório |
+| `tls_fingerprint` | SHA-256 hex do certificado DER |

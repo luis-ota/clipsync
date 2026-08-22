@@ -128,19 +128,39 @@ impl Default for ClipboardConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SecurityConfig {
+    /// Transporte obrigatório por padrão. `plaintext_legacy` existe apenas
+    /// para interoperabilidade explícita com clients v0.1.
+    pub transport: Transport,
     /// Aceita apenas conexões cujo endereço de origem seja local (loopback,
     /// privado ou link-local). Isto não prova a mesma sub-rede nem inspeciona
     /// SSID.
     pub local_only: bool,
     /// Timeout de pareamento (segundos).
     pub pairing_timeout_secs: u64,
+    /// Paths opcionais da identidade TLS persistente.
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
+    /// Se informado, impede iniciar com outro certificado.
+    pub tls_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    #[default]
+    Tls,
+    PlaintextLegacy,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
+            transport: Transport::Tls,
             local_only: true,
             pairing_timeout_secs: 120,
+            tls_cert_path: None,
+            tls_key_path: None,
+            tls_fingerprint: None,
         }
     }
 }

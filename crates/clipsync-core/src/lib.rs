@@ -25,6 +25,7 @@ mod persistence;
 pub mod protocol;
 pub mod server;
 pub mod state;
+pub mod tls;
 pub mod transport;
 
 pub use error::{Error, Result};
