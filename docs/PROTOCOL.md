@@ -149,6 +149,17 @@ reserva codificada, mantendo cada mensagem abaixo da fila de 16 MiB do OkHttp.
 > Planejado v0.3: transferência via frames binários WebSocket com
 > hash + id de transferência, evitando base64 para arquivos grandes.
 
+O sender deduplica clipboard por `sha256` dentro de cada sessão de peer:
+uma cópia repetida não gera outro envio. Não há `ack` ou referência nova no
+protocolo; ao reconectar, o peer recebe novamente o primeiro conteúdo visto.
+O debounce do watcher é trailing e de 300 ms, portanto uma sequência local
+rápida envia apenas o último snapshot.
+
+Compressão e headers compartilhados não foram adicionados: o transporte atual
+não negocia `permessage-deflate`, e remover campos do handshake seria uma
+mudança de protocolo sem ganho medido. `cargo bench --bench perf` registra o
+tamanho JSON e o tempo de serialização para texto de 1 KiB e imagem de 1 MiB.
+
 ### HTML (rich text, v0.2)
 
 ```json

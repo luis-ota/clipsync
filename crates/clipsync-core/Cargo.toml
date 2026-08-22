@@ -33,5 +33,9 @@ toml.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
 tokio-tungstenite.workspace = true
 
+[[bench]]
+name = "perf"
+harness = false
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("x11-fallback"))'] }

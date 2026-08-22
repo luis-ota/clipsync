@@ -249,6 +249,16 @@ pub enum Message {
 }
 
 impl Message {
+    /// SHA-256 usado para deduplicar mensagens de clipboard no sender.
+    pub fn clipboard_sha256(&self) -> Option<&str> {
+        match self {
+            Self::ClipboardText { sha256, .. }
+            | Self::ClipboardImage { sha256, .. }
+            | Self::ClipboardHtml { sha256, .. } => Some(sha256),
+            _ => None,
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Hello { .. } => "hello",
