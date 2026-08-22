@@ -62,6 +62,11 @@ enum Commands {
         #[arg(long, default_value_t = 5)]
         timeout: u64,
     },
+    /// Valida a configuração sem iniciar o daemon.
+    ValidateConfig {
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+    },
     /// Gerencia endpoints de clientes LAN/relay. Tokens ficam fora do TOML.
     Endpoints {
         #[command(subcommand)]
@@ -87,11 +92,6 @@ enum EndpointCommands {
     },
     Select {
         name: String,
-    },
-    /// Valida a configuração sem iniciar o daemon.
-    ValidateConfig {
-        #[arg(long, value_name = "PATH")]
-        config: Option<std::path::PathBuf>,
     },
 }
 
