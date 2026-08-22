@@ -51,7 +51,7 @@ clipsync/
 │   ├── clipsyncd/       # binário do daemon (CLI + tray)
 │   └── clipsync-harness/# client de referência e testes manuais
 ├── android/             # app Android (Kotlin + Compose)
-├── crates/clipsync-client/ # cliente desktop macOS/Windows (texto)
+├── crates/clipsync-client/ # cliente desktop macOS/Windows (tray + clipboard)
 ├── docs/                # arquitetura, protocolo
 └── .github/workflows/   # CI
 ```
@@ -157,10 +157,10 @@ relay de rede continua disponível. O limite padrão de imagem é 25 MiB.
 
 ### macOS e Windows (cliente mínimo)
 
-O cliente oficial usa o clipboard nativo via `arboard` e sincroniza texto.
-Ele não oferece tray, descoberta mDNS, imagens ou persistência de identidade
-nesta primeira entrega. O PIN é informado explicitamente, e cada execução sem
-uma identidade persistida exige novo pareamento.
+O cliente oficial usa o clipboard nativo via `arboard`, texto/imagem, descoberta
+mDNS, reconnect e tray nativo em macOS/Windows. Identidade, token relay e chave
+E2E são persistidos por servidor no Keychain/DPAPI; Linux compila, mas não grava
+segredos em arquivo.
 
 ```bash
 cargo run -p clipsync-client -- --pin 834921 ws://192.168.1.50:8765/ws

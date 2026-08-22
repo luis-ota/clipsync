@@ -13,14 +13,16 @@ use std::time::Duration;
 
 use arboard::{Clipboard, ImageData};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use clipsync_core::auth::{GroupId, SessionId};
 use clipsync_core::clipboard::sha256_hex;
 use clipsync_core::discovery::Discovery;
 use clipsync_core::protocol::{
     Capabilities, DeviceId, DeviceInfo, DeviceKind, Message, PROTOCOL_VERSION,
 };
-use clipsync_core::relay_crypto::{load_key_ring, OutboundEnvelope, RelayHeader, RelayKeyRing};
+use clipsync_core::relay_crypto::{
+    load_key_ring_text, read_key_material, OutboundEnvelope, RelayHeader, RelayKeyRing,
+};
 use futures::{SinkExt, StreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -30,6 +32,20 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{connect_async_tls_with_config, Connector};
+
+#[cfg(any(target_os = "macos", windows))]
+mod desktop_tray {
+    pub fn start() -> Result<tray_item::TrayItem, String> {
+        let mut tray =
+            tray_item::TrayItem::new("ClipSync", tray_item::IconSource::Resource("clipsync"))
+                .map_err(|e| e.to_string())?;
+        tray.add_label("ClipSync conectado")
+            .map_err(|e| e.to_string())?;
+        tray.add_menu_item("Sair", || std::process::exit(0))
+            .map_err(|e| e.to_string())?;
+        Ok(tray)
+    }
+}
 
 const DEFAULT_URL: &str = "ws://127.0.0.1:8765/ws";
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
@@ -52,10 +68,11 @@ struct Cli {
     /// Fingerprint SHA-256 do certificado DER, sem confiança em hostname.
     #[arg(long, env = "CLIPSYNC_TLS_FINGERPRINT")]
     tls_fingerprint: Option<String>,
-    /// Bearer token para relay. Nunca é gravado no estado local.
+    /// Bearer token para relay. Após o pareamento é gravado no Keychain/DPAPI.
     #[arg(long, env = "CLIPSYNC_RELAY_TOKEN", hide_env_values = true)]
     relay_token: Option<String>,
-    /// Referência ao material `key_id group_id hex_key`, nunca a chave em URL.
+    /// Referência ao material `key_id group_id hex_key`; o material é protegido
+    /// no Keychain/DPAPI após o pareamento.
     #[arg(long, env = "CLIPSYNC_E2E_KEY_REF", hide_env_values = true)]
     e2e_key_ref: Option<String>,
     /// Não fazer browse mDNS quando --url não for informado.
@@ -64,6 +81,16 @@ struct Cli {
     /// Seleciona um pairing persistido quando o servidor mudou de endpoint.
     #[arg(long, env = "CLIPSYNC_SERVER_ID")]
     server_id: Option<DeviceId>,
+    /// Política de leitura: auto prefere texto e usa imagem quando necessário.
+    #[arg(long, value_enum, default_value_t = ClipboardMode::Auto)]
+    clipboard: ClipboardMode,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ClipboardMode {
+    Auto,
+    Text,
+    Image,
 }
 
 type Ws =
@@ -82,6 +109,56 @@ struct ServerPairing {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ClientState {
     pairings: Vec<ServerPairing>,
+}
+
+#[derive(Debug, Clone)]
+struct Credentials {
+    relay_token: Option<String>,
+    e2e_key_text: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+mod secure_store {
+    use super::*;
+    const SERVICE: &str = "clipsync.desktop";
+
+    fn entry(server_id: &DeviceId, field: &str) -> Result<keyring::Entry, String> {
+        keyring::Entry::new(SERVICE, &format!("{server_id}:{field}")).map_err(|e| e.to_string())
+    }
+
+    pub fn load(server_id: &DeviceId) -> Result<Credentials, String> {
+        let token = entry(server_id, "relay-token")?.get_password().ok();
+        let key = entry(server_id, "e2e-key")?.get_password().ok();
+        Ok(Credentials {
+            relay_token: token,
+            e2e_key_text: key,
+        })
+    }
+
+    pub fn save(server_id: &DeviceId, credentials: &Credentials) -> Result<(), String> {
+        if let Some(token) = &credentials.relay_token {
+            entry(server_id, "relay-token")?
+                .set_password(token)
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(key) = &credentials.e2e_key_text {
+            entry(server_id, "e2e-key")?
+                .set_password(key)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+mod secure_store {
+    use super::*;
+    pub fn load(_: &DeviceId) -> Result<Credentials, String> {
+        Ok(Credentials {
+            relay_token: None,
+            e2e_key_text: None,
+        })
+    }
 }
 
 impl ClientState {
@@ -140,14 +217,41 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
+    #[cfg(any(target_os = "macos", windows))]
+    let _tray = match desktop_tray::start() {
+        Ok(tray) => Some(tray),
+        Err(error) => {
+            eprintln!("tray indisponível; continuando em foreground: {error}");
+            None
+        }
+    };
     let mut state = ClientState::load()?;
-    let endpoint = resolve_endpoint(&cli).await?;
+    let mut endpoint = resolve_endpoint(&cli).await?;
+    let pairing_id = cli.server_id.clone().or_else(|| {
+        state
+            .pairing_for(&endpoint.url)
+            .map(|p| p.server_id.clone())
+    });
+    let stored = pairing_id.as_ref().map(secure_store::load).transpose()?;
+    let relay_token = cli
+        .relay_token
+        .clone()
+        .or_else(|| stored.as_ref().and_then(|s| s.relay_token.clone()));
+    let e2e_key_text = if cli.e2e_key_ref.is_some() {
+        cli.e2e_key_ref
+            .as_deref()
+            .map(read_key_material)
+            .transpose()
+            .map_err(|e| e.to_string())?
+    } else {
+        stored.as_ref().and_then(|s| s.e2e_key_text.clone())
+    };
     let mut delay = Duration::from_secs(1);
     loop {
         match connect(
             &endpoint.url,
             endpoint.fingerprint.as_deref(),
-            cli.relay_token.as_deref(),
+            relay_token.as_deref(),
         )
         .await
         {
@@ -162,12 +266,23 @@ async fn run(cli: Cli) -> Result<(), String> {
             {
                 Ok((device_id, session_id)) => {
                     delay = Duration::from_secs(1);
-                    let crypto = if cli.relay_token.is_some() {
-                        let reference = cli
-                            .e2e_key_ref
-                            .as_deref()
-                            .ok_or("relay exige CLIPSYNC_E2E_KEY_REF")?;
-                        let (ring, group) = load_key_ring(reference).map_err(|e| e.to_string())?;
+                    #[cfg(any(target_os = "macos", windows))]
+                    if let Some(server_id) = state
+                        .pairing_for(&endpoint.url)
+                        .map(|p| p.server_id.clone())
+                    {
+                        let credentials = Credentials {
+                            relay_token: relay_token.clone(),
+                            e2e_key_text: e2e_key_text.clone(),
+                        };
+                        if credentials.relay_token.is_some() || credentials.e2e_key_text.is_some() {
+                            secure_store::save(&server_id, &credentials)?;
+                        }
+                    }
+                    let crypto = if relay_token.is_some() {
+                        let key_text = e2e_key_text.as_deref().ok_or("relay exige material E2E")?;
+                        let (ring, group) =
+                            load_key_ring_text(key_text).map_err(|e| e.to_string())?;
                         Some((
                             ring,
                             SessionId::from_string(session_id)
@@ -178,7 +293,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     } else {
                         None
                     };
-                    if let Err(error) = run_clipboard(ws, device_id, crypto).await {
+                    if let Err(error) = run_clipboard(ws, device_id, crypto, cli.clipboard).await {
                         eprintln!("conexão perdida: {error}; reconectando");
                     }
                 }
@@ -193,6 +308,11 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(RECONNECT_MAX);
+        if cli.url.is_none() {
+            if let Ok(discovered) = resolve_endpoint(&cli).await {
+                endpoint = discovered;
+            }
+        }
     }
 }
 
@@ -395,6 +515,7 @@ async fn run_clipboard(
     mut ws: Ws,
     device_id: DeviceId,
     mut crypto: Option<(RelayKeyRing, SessionId, GroupId, u64)>,
+    mode: ClipboardMode,
 ) -> Result<(), String> {
     let mut clipboard =
         Clipboard::new().map_err(|e| format!("clipboard nativo indisponível: {e}"))?;
@@ -405,18 +526,27 @@ async fn run_clipboard(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Ok(text) = clipboard.get_text() {
+                let mut text_read = false;
+                if !matches!(mode, ClipboardMode::Image) {
+                    if let Ok(text) = clipboard.get_text() {
+                    text_read = true;
                     let hash = sha256_hex(text.as_bytes());
                     if last_hash.as_deref() != Some(hash.as_str()) {
                         last_hash = Some(hash.clone());
                         send_wire(&mut ws, Message::ClipboardText { mime: "text/plain;charset=utf-8".into(), content: text, origin: device_id.clone(), sha256: hash }, &mut crypto, &device_id).await?;
                     }
-                } else if let Ok(image) = clipboard.get_image() {
+                    }
+                }
+                if !matches!(mode, ClipboardMode::Text)
+                    && (matches!(mode, ClipboardMode::Image) || !text_read)
+                {
+                    if let Ok(image) = clipboard.get_image() {
                     let data = png_bytes(&image)?;
                     let hash = sha256_hex(&data);
                     if last_hash.as_deref() != Some(hash.as_str()) {
                         last_hash = Some(hash.clone());
                         send_wire(&mut ws, Message::ClipboardImage { mime: "image/png".into(), data_b64: STANDARD.encode(data), width: Some(image.width as u32), height: Some(image.height as u32), sha256: hash, origin: device_id.clone() }, &mut crypto, &device_id).await?;
+                    }
                     }
                 }
             }

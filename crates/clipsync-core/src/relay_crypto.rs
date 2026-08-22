@@ -88,6 +88,12 @@ pub fn load_key_material(reference: &str) -> Result<(String, GroupId, [u8; 32]),
 /// earlier lines remain decryptable during rotation.
 pub fn load_key_ring(reference: &str) -> Result<(RelayKeyRing, GroupId), RelayCryptoError> {
     let text = read_key_text(reference)?;
+    load_key_ring_text(&text)
+}
+
+/// Loads key generations from already-protected storage (for example a native
+/// keychain). The text never needs to be written to a temporary plaintext file.
+pub fn load_key_ring_text(text: &str) -> Result<(RelayKeyRing, GroupId), RelayCryptoError> {
     let mut entries = text.lines().map(parse_key_line);
     let (first_id, group, first_key) = entries.next().ok_or(RelayCryptoError::KeyMaterial)??;
     let mut ring = RelayKeyRing::new(first_id, first_key)?;
@@ -99,6 +105,12 @@ pub fn load_key_ring(reference: &str) -> Result<(RelayKeyRing, GroupId), RelayCr
         ring.rotate(key_id, key)?;
     }
     Ok((ring, group))
+}
+
+/// Reads provisioned key material so a caller can immediately put it into a
+/// platform secret store. This is intentionally not a persistence fallback.
+pub fn read_key_material(reference: &str) -> Result<String, RelayCryptoError> {
+    read_key_text(reference)
 }
 
 fn read_key_text(reference: &str) -> Result<String, RelayCryptoError> {
