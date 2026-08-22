@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  metadata:
+    name: release-metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - id: meta
+        shell: bash
+        env:
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-$PUSH_TAG}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "invalid release tag: $tag" >&2
+            exit 1
+          }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: linux-release
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev rpm
+      - name: Validate and build Linux release artifacts
+        env:
+          CLIPSYNC_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          cargo test --workspace --no-fail-fast
+          packaging/build-release.sh "$RUNNER_TEMP/clipsync-dist"
+          packaging/smoke-test.sh "$RUNNER_TEMP/clipsync-dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipsync-linux-${{ needs.metadata.outputs.version }}
+          path: ${{ runner.temp }}/clipsync-dist/*
+          if-no-files-found: error
+
+  android:
+    name: android-release
+    needs: metadata
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Test and build installable APK
+        run: |
+          ./gradlew test lint assembleDebug -PversionName=${{ needs.metadata.outputs.version }}
+          mkdir -p "$RUNNER_TEMP/clipsync-dist"
+          cp app/build/outputs/apk/debug/app-debug.apk \
+            "$RUNNER_TEMP/clipsync-dist/clipsync-android-${{ needs.metadata.outputs.version }}-debug.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipsync-android-${{ needs.metadata.outputs.version }}
+          path: ${{ runner.temp }}/clipsync-dist/*
+          if-no-files-found: error
+
+  desktop:
+    name: desktop-${{ matrix.os }}
+    needs: metadata
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            suffix: macos
+            binary: clipsync-client
+          - os: windows-latest
+            suffix: windows
+            binary: clipsync-client.exe
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build desktop client
+        run: cargo build --locked --release -p clipsync-client
+      - name: Stage desktop artifact
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/clipsync-dist"
+          cp "target/release/${{ matrix.binary }}" \
+            "$RUNNER_TEMP/clipsync-dist/clipsync-${{ matrix.suffix }}-${{ needs.metadata.outputs.version }}${{ matrix.suffix == 'windows' && '.exe' || '' }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipsync-${{ matrix.suffix }}-${{ needs.metadata.outputs.version }}
+          path: ${{ runner.temp }}/clipsync-dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish-github-release
+    needs: [metadata, linux, android, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: clipsync-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish release and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          find release-assets -type f -print0 | sort -z | xargs -0 sha256sum > release-assets/SHA256SUMS
+          gh release create "$TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "clipsync $TAG" \
+            --generate-notes
