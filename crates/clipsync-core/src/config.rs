@@ -88,7 +88,11 @@ pub struct EndpointConfig {
     pub tls_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
-    /// LAN não usa bearer; relay exige bearer.
+    /// Referência ao arquivo/variável com `key_id group_id hex_key`.
+    /// Nunca contém o segredo da chave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e2e_key_ref: Option<String>,
+    /// LAN não usa bearer; relay exige bearer e chave E2E.
     #[serde(default)]
     pub scope: EndpointScope,
 }
@@ -141,6 +145,14 @@ impl EndpointConfig {
         {
             return Err(Error::Config(format!(
                 "endpoint relay '{}' exige credential_ref",
+                self.name
+            )));
+        }
+        if matches!(self.scope, EndpointScope::Relay)
+            && self.e2e_key_ref.as_deref().map_or(true, str::is_empty)
+        {
+            return Err(Error::Config(format!(
+                "endpoint relay '{}' exige e2e_key_ref",
                 self.name
             )));
         }
@@ -494,6 +506,7 @@ mod tests {
             transport: Transport::Tls,
             tls_fingerprint: Some("a".repeat(64)),
             credential_ref: Some("CLIPSYNC_RELAY_TOKEN".into()),
+            e2e_key_ref: Some("file:/run/clipsync/group.key".into()),
             scope: EndpointScope::Relay,
         };
         assert!(endpoint.validate().is_ok());

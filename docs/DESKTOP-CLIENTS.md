@@ -13,6 +13,8 @@ e #62. Ele é um processo foreground, não substitui o `clipsyncd` Linux.
 - Descobre `_clipsync._tcp.local.` via mDNS quando `--url` não é informado.
 - Endpoints manuais usam `--url`; `wss://` exige fingerprint SHA-256 do DER.
 - Relay usa `--relay-token`/`CLIPSYNC_RELAY_TOKEN` como Bearer somente no handshake.
+- O clipboard no relay usa `relay_envelope` AES-256-GCM ponta a ponta. Provisione
+  a chave por `e2e_key_ref`/`CLIPSYNC_E2E_KEY_REF`, nunca na URL ou em logs.
 
 ## Limitações explícitas
 
@@ -35,8 +37,13 @@ clipsync-client --url wss://192.168.1.50:8765/ws \
 
 # relay com Bearer (não persistido)
 clipsync-client --url wss://relay.example.com/ws \
-  --tls-fingerprint <sha256-do-certificado> --relay-token "$CLIPSYNC_RELAY_TOKEN"
+  --tls-fingerprint <sha256-do-certificado> --relay-token "$CLIPSYNC_RELAY_TOKEN" \
+  --e2e-key-ref file:/etc/clipsync/relay-group.key
 ```
+
+O arquivo contém uma linha `key_id group_id hex_key` por geração e deve ter modo
+`0600`; a última linha é a atual. Mantenha as gerações anteriores disponíveis
+durante a rotação.
 
 O PIN é gerado e exibido localmente pelo daemon. Ele nunca é enviado no
 `pair_challenge`; o usuário deve informar o valor mostrado no daemon/tray. Depois

@@ -17,6 +17,7 @@ data class DiscoveredServer(
     val credentialRef: String? = null,
     val remote: Boolean = false,
     val deviceId: String? = null,
+    val e2eKeyRef: String? = null,
 ) {
     val id: String get() = serverId ?: "legacy:$serviceName"
 }

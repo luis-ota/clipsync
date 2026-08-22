@@ -86,6 +86,8 @@ enum EndpointCommands {
         tls_fingerprint: Option<String>,
         #[arg(long)]
         credential_ref: Option<String>,
+        #[arg(long)]
+        e2e_key_ref: Option<String>,
         #[arg(long, default_value = "lan")]
         scope: String,
     },
@@ -294,6 +296,7 @@ async fn cmd_endpoints(command: EndpointCommands) {
             transport,
             tls_fingerprint,
             credential_ref,
+            e2e_key_ref,
             scope,
         } => {
             let transport = match transport.as_str() {
@@ -310,6 +313,7 @@ async fn cmd_endpoints(command: EndpointCommands) {
                 transport,
                 tls_fingerprint,
                 credential_ref,
+                e2e_key_ref,
                 scope: match scope.as_str() {
                     "lan" => EndpointScope::Lan,
                     "relay" => EndpointScope::Relay,
@@ -703,6 +707,7 @@ mod tests {
             transport: Transport::Tls,
             tls_fingerprint: Some("a".repeat(64)),
             credential_ref: Some("TOKEN_ENV".into()),
+            e2e_key_ref: Some("file:/run/clipsync/group.key".into()),
             scope: EndpointScope::Relay,
         };
         assert!(!format!("{endpoint:?}").contains("secret"));
