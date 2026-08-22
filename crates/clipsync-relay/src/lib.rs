@@ -17,9 +17,11 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use clipsync_core::protocol::{DeviceId, Message};
+use clipsync_core::auth::{GroupAuthorizer, GroupId, RelayEnvelope, ReplayProtector, SessionId};
+use clipsync_core::protocol::{DeviceId, Message, PROTOCOL_VERSION};
 use futures::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, RwLock};
+use sha2::{Digest, Sha256};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
@@ -31,6 +33,20 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct RelayIdentity {
     pub account_id: String,
     pub device_id: DeviceId,
+    pub session_id: SessionId,
+    pub group_id: GroupId,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WireEnvelope {
+    #[serde(rename = "type")]
+    kind: String,
+    session_id: SessionId,
+    source: DeviceId,
+    destination: Option<DeviceId>,
+    group: GroupId,
+    sequence: u64,
+    payload: Message,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -41,6 +57,79 @@ pub struct AuthError;
 #[async_trait::async_trait]
 pub trait TokenVerifier: Send + Sync + 'static {
     async fn verify(&self, opaque_token: &str) -> Result<RelayIdentity, AuthError>;
+}
+
+/// Token provider intended for production deployments. The file format is one
+/// record per line: `token account device session group`. Tokens are hashed in
+/// memory and are never logged or retained in plaintext after startup.
+#[derive(Debug, Clone)]
+pub struct FileTokenProvider {
+    tokens: Arc<HashMap<[u8; 32], RelayIdentity>>,
+}
+
+impl FileTokenProvider {
+    pub fn from_path(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let metadata = std::fs::metadata(path).map_err(|e| format!("token file: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err("token file must not be readable by group or other".into());
+            }
+        }
+        let contents = std::fs::read_to_string(path).map_err(|e| format!("token file: {e}"))?;
+        let mut tokens = HashMap::new();
+        for (line_number, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() != 5 {
+                return Err(format!(
+                    "token file line {}: expected 5 fields",
+                    line_number + 1
+                ));
+            }
+            let identity = RelayIdentity {
+                account_id: fields[1].to_owned(),
+                device_id: DeviceId::from(fields[2]),
+                session_id: SessionId::from_string(fields[3])
+                    .ok_or_else(|| format!("token file line {}: empty session", line_number + 1))?,
+                group_id: GroupId::from_string(fields[4])
+                    .ok_or_else(|| format!("token file line {}: empty group", line_number + 1))?,
+            };
+            let digest: [u8; 32] = Sha256::digest(fields[0].as_bytes()).into();
+            if tokens.insert(digest, identity).is_some() {
+                return Err(format!(
+                    "token file line {}: duplicate token",
+                    line_number + 1
+                ));
+            }
+        }
+        if tokens.is_empty() {
+            return Err("token file contains no credentials".into());
+        }
+        Ok(Self {
+            tokens: Arc::new(tokens),
+        })
+    }
+
+    pub fn authorizer(&self) -> GroupAuthorizer {
+        let mut authorizer = GroupAuthorizer::default();
+        for identity in self.tokens.values() {
+            authorizer.add_member(identity.group_id.clone(), identity.device_id.clone());
+        }
+        authorizer
+    }
+}
+
+#[async_trait::async_trait]
+impl TokenVerifier for FileTokenProvider {
+    async fn verify(&self, opaque_token: &str) -> Result<RelayIdentity, AuthError> {
+        let digest: [u8; 32] = Sha256::digest(opaque_token.as_bytes()).into();
+        self.tokens.get(&digest).cloned().ok_or(AuthError)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,9 +162,27 @@ struct Session {
     tx: mpsc::Sender<Arc<Message>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RelayState {
     sessions: RwLock<HashMap<String, Session>>,
+    groups: GroupAuthorizer,
+    replay: Mutex<ReplayProtector>,
+}
+
+impl Default for RelayState {
+    fn default() -> Self {
+        Self::with_groups(GroupAuthorizer::default())
+    }
+}
+
+impl RelayState {
+    fn with_groups(groups: GroupAuthorizer) -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            groups,
+            replay: Mutex::new(ReplayProtector::default()),
+        }
+    }
 }
 
 impl RelayState {
@@ -96,21 +203,63 @@ impl RelayState {
 
     pub async fn detach(&self, session_id: &str) {
         let mut sessions = self.sessions.write().await;
-        sessions.remove(session_id);
+        if let Some(session) = sessions.remove(session_id) {
+            self.replay
+                .lock()
+                .await
+                .forget(&session.identity.session_id);
+        }
     }
 
-    /// Routes only within the authenticated account. A full queue is a
+    pub async fn route_envelope(
+        &self,
+        mut envelope: RelayEnvelope,
+        authenticated_source: &DeviceId,
+    ) -> Result<usize, String> {
+        envelope
+            .authorize(
+                authenticated_source,
+                &self.groups,
+                &mut *self.replay.lock().await,
+            )
+            .map_err(|error| format!("authorization rejected: {error:?}"))?;
+        Ok(self
+            .route_by_source(
+                &envelope.source,
+                &envelope.group,
+                envelope.destination.as_ref(),
+                envelope.payload,
+            )
+            .await)
+    }
+
+    /// Routes only within the authenticated group. A full queue is a
     /// deliberate backpressure signal: the slow session is disconnected.
-    pub async fn route(&self, sender: &RelayIdentity, message: Message) -> usize {
-        let message = Arc::new(message.with_origin(&sender.device_id));
+    #[cfg(test)]
+    async fn route(&self, sender: &RelayIdentity, message: Message) -> usize {
+        self.route_by_source(&sender.device_id, &sender.group_id, None, message)
+            .await
+    }
+
+    async fn route_by_source(
+        &self,
+        source: &DeviceId,
+        group: &GroupId,
+        destination: Option<&DeviceId>,
+        message: Message,
+    ) -> usize {
+        let message = Arc::new(message.with_origin(source));
         let sessions: Vec<(String, mpsc::Sender<Arc<Message>>)> = self
             .sessions
             .read()
             .await
             .values()
             .filter(|session| {
-                session.identity.account_id == sender.account_id
-                    && session.identity.device_id != sender.device_id
+                session.identity.group_id == *group
+                    && destination.map_or(true, |destination| {
+                        session.identity.device_id == *destination
+                    })
+                    && session.identity.device_id != *source
             })
             .map(|session| (session.session_id.clone(), session.tx.clone()))
             .collect();
@@ -159,10 +308,18 @@ impl std::fmt::Debug for RelayServer {
 
 impl RelayServer {
     pub fn new(config: RelayConfig, verifier: Arc<dyn TokenVerifier>) -> Self {
+        Self::new_with_groups(config, verifier, GroupAuthorizer::default())
+    }
+
+    pub fn new_with_groups(
+        config: RelayConfig,
+        verifier: Arc<dyn TokenVerifier>,
+        groups: GroupAuthorizer,
+    ) -> Self {
         assert!(config.queue_capacity > 0, "queue capacity must be positive");
         Self {
             config,
-            state: Arc::new(RelayState::default()),
+            state: Arc::new(RelayState::with_groups(groups)),
             verifier,
             shutdown: CancellationToken::new(),
         }
@@ -285,9 +442,8 @@ async fn connection(
     shutdown: CancellationToken,
 ) {
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel(capacity);
-    let session_id = state.attach(identity.clone(), tx.clone()).await;
-    info!(%peer, device = %identity.device_id, "relay session connected");
+    let (tx, mut rx) = mpsc::channel::<Arc<Message>>(capacity);
+    let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             match message.to_json() {
@@ -300,9 +456,20 @@ async fn connection(
             }
         }
     });
-    let _ = relay_loop(&mut stream, &state, &identity, &tx, &shutdown).await;
-    state.detach(&session_id).await;
+    let result = relay_loop(
+        &mut stream,
+        &state,
+        &identity,
+        &tx,
+        &sequence,
+        peer,
+        &shutdown,
+    )
+    .await;
     writer.abort();
+    if let Ok(Some(session_id)) = result {
+        state.detach(&session_id).await;
+    }
     let _ = writer.await;
 }
 
@@ -311,29 +478,59 @@ async fn relay_loop<S>(
     state: &Arc<RelayState>,
     identity: &RelayIdentity,
     own_tx: &mpsc::Sender<Arc<Message>>,
+    sequence: &Arc<std::sync::atomic::AtomicU64>,
+    peer: SocketAddr,
     shutdown: &CancellationToken,
-) -> Result<(), ()>
+) -> Result<Option<String>, ()>
 where
     S: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
 {
     let first = tokio::select! {
-        _ = shutdown.cancelled() => return Ok(()),
+        _ = shutdown.cancelled() => return Ok(None),
         first = tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.next()) => first.map_err(|_| ())?,
     };
-    if let Some(frame) = first {
-        handle_frame(frame.map_err(|_| ())?, state, identity, own_tx).await?;
-    } else {
-        return Ok(());
-    }
+    let session_id = match first {
+        Some(frame) => handle_hello(frame.map_err(|_| ())?, identity).await?,
+        None => return Ok(None),
+    };
+    let attached = state.attach(identity.clone(), own_tx.clone()).await;
+    info!(%peer, device = %identity.device_id, "relay session connected");
     loop {
         let frame = tokio::select! {
-            _ = shutdown.cancelled() => return Ok(()),
+            _ = shutdown.cancelled() => return Ok(Some(attached)),
             frame = stream.next() => frame,
         };
         let Some(frame) = frame else {
-            return Ok(());
+            return Ok(Some(attached));
         };
-        handle_frame(frame.map_err(|_| ())?, state, identity, own_tx).await?;
+        if handle_frame(
+            frame.map_err(|_| ())?,
+            state,
+            identity,
+            own_tx,
+            sequence,
+            &session_id,
+        )
+        .await
+        .is_err()
+        {
+            return Ok(Some(attached));
+        }
+    }
+}
+
+async fn handle_hello(frame: WsMessage, identity: &RelayIdentity) -> Result<SessionId, ()> {
+    let WsMessage::Text(text) = frame else {
+        return Err(());
+    };
+    match serde_json::from_str::<Message>(&text) {
+        Ok(Message::Hello { v, device }) if v == PROTOCOL_VERSION => {
+            if device.id.is_some_and(|id| id != identity.device_id) {
+                return Err(());
+            }
+            Ok(identity.session_id.clone())
+        }
+        _ => Err(()),
     }
 }
 
@@ -342,10 +539,12 @@ async fn handle_frame(
     state: &Arc<RelayState>,
     identity: &RelayIdentity,
     own_tx: &mpsc::Sender<Arc<Message>>,
+    sequence: &Arc<std::sync::atomic::AtomicU64>,
+    session_id: &SessionId,
 ) -> Result<(), ()> {
     match frame {
         WsMessage::Text(text) => match serde_json::from_str::<Message>(&text) {
-            Ok(Message::Hello { .. }) => Ok(()),
+            Ok(Message::Hello { .. }) => Err(()),
             Ok(Message::PairChallenge { .. })
             | Ok(Message::PairSubmit { .. })
             | Ok(Message::PairOk { .. })
@@ -356,10 +555,42 @@ async fn handle_frame(
             }
             Ok(Message::Pong { .. }) => Ok(()),
             Ok(message) => {
-                state.route(identity, message).await;
-                Ok(())
+                let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let envelope = RelayEnvelope {
+                    session_id: session_id.clone(),
+                    source: identity.device_id.clone(),
+                    destination: None,
+                    group: identity.group_id.clone(),
+                    sequence,
+                    payload: message,
+                };
+                state
+                    .route_envelope(envelope, &identity.device_id)
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| ())
             }
-            Err(_) => Err(()),
+            Err(_) => {
+                let envelope: WireEnvelope = serde_json::from_str(&text).map_err(|_| ())?;
+                if envelope.kind != "relay_envelope" || envelope.session_id != *session_id {
+                    return Err(());
+                }
+                state
+                    .route_envelope(
+                        RelayEnvelope {
+                            session_id: envelope.session_id,
+                            source: envelope.source,
+                            destination: envelope.destination,
+                            group: envelope.group,
+                            sequence: envelope.sequence,
+                            payload: envelope.payload,
+                        },
+                        &identity.device_id,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| ())
+            }
         },
         WsMessage::Close(_) => Err(()),
         WsMessage::Ping(_) | WsMessage::Pong(_) => Ok(()),
@@ -375,6 +606,8 @@ mod tests {
         RelayIdentity {
             account_id: account.into(),
             device_id: device.into(),
+            session_id: SessionId::from_string(format!("session-{device}")).unwrap(),
+            group_id: GroupId::from_string(format!("group-{account}")).unwrap(),
         }
     }
 
@@ -442,5 +675,61 @@ mod tests {
         assert_eq!(state.len().await, 1);
         state.detach(&new_id).await;
         assert_eq!(state.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn authenticated_hello_and_clipboard_round_trip_through_relay() {
+        let source = identity("account", "source");
+        let target = identity("account", "target");
+        let mut groups = GroupAuthorizer::default();
+        groups.add_member(source.group_id.clone(), source.device_id.clone());
+        groups.add_member(target.group_id.clone(), target.device_id.clone());
+        let state = Arc::new(RelayState::with_groups(groups));
+        let (target_tx, mut target_rx) = mpsc::channel(2);
+        state.attach(target.clone(), target_tx).await;
+        let (source_tx, _) = mpsc::channel(2);
+        let hello = Message::Hello {
+            v: PROTOCOL_VERSION,
+            device: clipsync_core::protocol::DeviceInfo::new(
+                "source",
+                clipsync_core::protocol::DeviceKind::Linux,
+            )
+            .with_capabilities(clipsync_core::protocol::Capabilities {
+                text: true,
+                ..Default::default()
+            }),
+        };
+        let clipboard = Message::ClipboardText {
+            mime: "text/plain".into(),
+            content: "end-to-end".into(),
+            origin: DeviceId::from("forged"),
+            sha256: "hash".into(),
+        };
+        let mut frames = futures::stream::iter(vec![
+            Ok(WsMessage::Text(serde_json::to_string(&hello).unwrap())),
+            Ok(WsMessage::Text(serde_json::to_string(&clipboard).unwrap())),
+        ]);
+        let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let shutdown = CancellationToken::new();
+        relay_loop(
+            &mut frames,
+            &state,
+            &source,
+            &source_tx,
+            &sequence,
+            "127.0.0.1:1".parse().unwrap(),
+            &shutdown,
+        )
+        .await
+        .unwrap();
+        match target_rx.recv().await.unwrap().as_ref() {
+            Message::ClipboardText {
+                origin, content, ..
+            } => {
+                assert_eq!(origin, &source.device_id);
+                assert_eq!(content, "end-to-end");
+            }
+            other => panic!("unexpected message: {}", other.type_name()),
+        }
     }
 }
