@@ -21,4 +21,7 @@ sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$VERSION\"/" 
 sed -i -E "s/orElse\(\"[0-9]+\.[0-9]+\.[0-9]+\"\)/orElse(\"$VERSION\")/" \
   "$ROOT/android/app/build.gradle.kts"
 
+# Keep Cargo.lock aligned so subsequent --locked release builds work on every OS.
+cargo check --workspace --quiet --manifest-path "$ROOT/Cargo.toml"
+
 printf 'release version set to %s\n' "$VERSION"
