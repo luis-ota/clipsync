@@ -63,14 +63,17 @@ private class SecureEndpointStore(private val preferences: android.content.Share
     fun load(): List<DiscoveredServer> = runCatching {
         val encoded = preferences.getString(ENDPOINTS_KEY, null) ?: return emptyList()
         decrypt(encoded).split('\n').filter { it.isNotBlank() }.mapNotNull { line ->
-            val fields = line.split('|')
-            if (fields.size !in 7..9) null else DiscoveredServer(
-                serviceName = fields[0], serverId = fields[1].ifBlank { null }, name = fields[0],
-                host = fields[2], port = fields[3].toInt(), tls = fields[4] == "tls",
-                tlsFingerprint = fields[5].ifBlank { null }, credentialRef = fields[6].ifBlank { null },
-                remote = true, deviceId = fields.getOrNull(7)?.ifBlank { null },
-                e2eKeyRef = fields.getOrNull(8)?.ifBlank { null },
-            )
+            runCatching {
+                val fields = line.split('|')
+                if (fields.size !in 7..9 || fields[3].toInt() !in 1..65535) return@runCatching null
+                DiscoveredServer(
+                    serviceName = fields[0], serverId = fields[1].ifBlank { null }, name = fields[0],
+                    host = fields[2], port = fields[3].toInt(), tls = fields[4] == "tls",
+                    tlsFingerprint = fields[5].ifBlank { null }, credentialRef = fields[6].ifBlank { null },
+                    remote = true, deviceId = fields.getOrNull(7)?.ifBlank { null },
+                    e2eKeyRef = fields.getOrNull(8)?.ifBlank { null },
+                )
+            }.getOrNull()
         }
     }.getOrDefault(emptyList())
 

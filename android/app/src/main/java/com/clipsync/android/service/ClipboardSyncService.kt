@@ -14,6 +14,7 @@ import com.clipsync.android.BuildConfig
 import com.clipsync.android.MainActivity
 import com.clipsync.android.R
 import com.clipsync.android.data.AppRepository
+import com.clipsync.android.data.BinaryTransferCodec
 import com.clipsync.android.data.ConnectionStatus
 import com.clipsync.android.data.DeviceInfo
 import com.clipsync.android.data.DeviceStore
@@ -177,6 +178,15 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
     override fun onMessage(generation: Long, payload: String) {
         incomingMessages.trySend(generation to payload)
     }
+    override fun onBinaryMessage(generation: Long, payload: ByteArray) {
+        if (!sessions.accepts(generation)) return
+        try {
+            BinaryTransferCodec.decode(payload)
+            setStatus(ConnectionStatus.ERROR, "Transferencia binaria requer confirmacao")
+        } catch (_: IllegalArgumentException) {
+            setStatus(ConnectionStatus.ERROR, "Frame binario invalido recebido")
+        }
+    }
     private suspend fun handlePayload(generation: Long, payload: String) {
         if (!sessions.accepts(generation)) return
         val message = try { withContext(Dispatchers.Default) {
@@ -221,7 +231,7 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
                 }
                 // A instância mDNS é a chave de compatibilidade para servidores
                 // antigos que ainda não anunciam nem retornam server_id.
-                val serverId = protocolId ?: discoveredId
+                val serverId = protocolId ?: discoveredId ?: selectedServer?.id
                 if (serverId != null) deviceStore.save(serverId, action.result.device_id)
                 currentDeviceId = action.result.device_id
                 setStatus(ConnectionStatus.CONNECTED, "Conectado a ${action.result.server_name}")

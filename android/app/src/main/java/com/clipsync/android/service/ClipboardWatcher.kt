@@ -10,6 +10,7 @@ import com.clipsync.android.data.Message
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
+import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,7 +25,7 @@ object ImageLimits {
 
     fun acceptsRawSize(size: Int): Boolean = size in 0..MAX_IMAGE_BYTES
     fun acceptsEncodedSize(size: Int): Boolean = size >= 0 &&
-        size + JSON_RESERVE_BYTES <= MAX_WEBSOCKET_MESSAGE_BYTES
+        size <= MAX_WEBSOCKET_MESSAGE_BYTES - JSON_RESERVE_BYTES
 }
 
 class PendingEchoes(
@@ -84,7 +85,7 @@ class ClipboardWatcher(
         val item = clip.getItemAt(0)
         item.text?.toString()?.let { text ->
             scope.launch {
-                val hash = withContext(Dispatchers.Default) { sha256(text.toByteArray()) }
+                val hash = withContext(Dispatchers.Default) { sha256(text.toByteArray(StandardCharsets.UTF_8)) }
                 if (!pendingEchoes.consume(hash)) {
                     onMessage(Message.ClipboardText("text/plain;charset=utf-8", text, origin, hash))
                 }
@@ -112,13 +113,13 @@ class ClipboardWatcher(
     fun writeText(message: Message.ClipboardText) {
         scope.launch {
             val valid = withContext(Dispatchers.Default) {
-                sha256(message.content.toByteArray()) == message.sha256
+                sha256(message.content.toByteArray(StandardCharsets.UTF_8)) == message.sha256
             }
             if (!valid) return@launch
+            pendingEchoes.add(message.sha256)
             try {
                 clipboard.setPrimaryClip(ClipData.newPlainText("ClipSync", message.content))
-                pendingEchoes.add(message.sha256)
-            } catch (_: RuntimeException) { }
+            } catch (_: RuntimeException) { pendingEchoes.consume(message.sha256) }
         }
     }
 
@@ -140,10 +141,10 @@ class ClipboardWatcher(
                 File(directory, "remote-${message.sha256}.$extension").also { it.writeBytes(bytes) }
             }
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+            pendingEchoes.add(message.sha256)
             try {
                 clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "ClipSync image", uri))
-                pendingEchoes.add(message.sha256)
-            } catch (_: RuntimeException) { }
+            } catch (_: RuntimeException) { pendingEchoes.consume(message.sha256) }
         }
     }
 
