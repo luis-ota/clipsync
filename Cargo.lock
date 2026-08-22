@@ -418,6 +418,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipsync-relay"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "clipsync-core",
+ "futures",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "clipsyncd"
 version = "0.1.0"
 dependencies = [
