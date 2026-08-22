@@ -1,7 +1,14 @@
 package com.clipsync.android.data
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import java.nio.charset.StandardCharsets
 import java.util.Base64
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 class DeviceStore(context: Context) {
     private val preferences = context.getSharedPreferences("clipsync", Context.MODE_PRIVATE)
@@ -18,7 +25,45 @@ class DeviceStore(context: Context) {
     fun deviceIdFor(serverId: String): String? = registry.deviceIdFor(serverId)
     fun save(serverId: String, deviceId: String) = registry.save(serverId, deviceId)
 
+    fun loadEndpoints(): List<DiscoveredServer> = SecureEndpointStore(preferences).load()
+    fun saveEndpoints(endpoints: List<DiscoveredServer>) = SecureEndpointStore(preferences).save(endpoints)
+
     private companion object { const val LEGACY_KEY = "device_id" }
+}
+
+/** Armazena apenas endpoint metadata; o token é referenciado por nome e não por valor. */
+private class SecureEndpointStore(private val preferences: android.content.SharedPreferences) {
+    fun load(): List<DiscoveredServer> = runCatching {
+        val encoded = preferences.getString(ENDPOINTS_KEY, null) ?: return emptyList()
+        decrypt(encoded).split('\n').filter { it.isNotBlank() }.mapNotNull { line ->
+            val fields = line.split('|')
+            if (fields.size != 6) null else DiscoveredServer(fields[0], fields[1], fields[0], fields[2], fields[3].toInt(), fields[4] == "tls", fields[5].ifBlank { null }, true)
+        }
+    }.getOrDefault(emptyList())
+
+    fun save(endpoints: List<DiscoveredServer>) {
+        val value = endpoints.joinToString("\n") { listOf(it.serviceName, it.id, it.host, it.port.toString(), if (it.tls) "tls" else "plain", it.tlsFingerprint.orEmpty()).joinToString("|") }
+        preferences.edit().putString(ENDPOINTS_KEY, encrypt(value)).apply()
+    }
+
+    private fun key(): SecretKey {
+        val store = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+            init(KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
+        }.generateKey()
+    }
+    private fun encrypt(value: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
+        return android.util.Base64.encodeToString(cipher.iv + cipher.doFinal(value.toByteArray(StandardCharsets.UTF_8)), android.util.Base64.NO_WRAP)
+    }
+    private fun decrypt(value: String): String {
+        val bytes = android.util.Base64.decode(value, android.util.Base64.NO_WRAP)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12))) }
+        return cipher.doFinal(bytes.copyOfRange(12, bytes.size)).toString(StandardCharsets.UTF_8)
+    }
+    private companion object { const val ENDPOINTS_KEY = "remote_endpoints"; const val KEY_ALIAS = "clipsync.endpoint.metadata" }
 }
 
 internal interface DeviceIdentityPersistence {

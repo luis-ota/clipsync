@@ -49,11 +49,14 @@ import com.clipsync.android.data.AppRepository
 import com.clipsync.android.data.AppUiState
 import com.clipsync.android.data.ConnectionStatus
 import com.clipsync.android.data.DiscoveredServer
+import com.clipsync.android.data.DeviceStore
+import java.net.URI
 import com.clipsync.android.service.ClipboardSyncService
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        RemoteEndpointStoreHolder.initialize(this)
         ContextCompat.startForegroundService(this, Intent(this, ClipboardSyncService::class.java))
         setContent { ClipSyncApp() }
     }
@@ -77,6 +80,7 @@ private fun ClipSyncApp() {
                 Spacer(Modifier.height(20.dp))
                 StatusCard(state)
                 if (state.status == ConnectionStatus.WAITING_FOR_PIN) PinForm()
+                RemoteEndpointForm()
                 Spacer(Modifier.height(24.dp))
                 Text("Computadores encontrados", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(8.dp))
@@ -98,6 +102,34 @@ private fun ClipSyncApp() {
             }
         }
     }
+}
+
+@Composable
+private fun RemoteEndpointForm() {
+    var name by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+    var fingerprint by remember { mutableStateOf("") }
+    Column {
+        Text("Adicionar relay ou endpoint remoto", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Nome") }, singleLine = true)
+        OutlinedTextField(url, { url = it }, Modifier.fillMaxWidth(), label = { Text("URL wss://host:porta/ws") }, singleLine = true)
+        OutlinedTextField(fingerprint, { fingerprint = it.filter(Char::isLetterOrDigit).lowercase().take(64) }, Modifier.fillMaxWidth(), label = { Text("Fingerprint SHA-256 (64 hex)") }, singleLine = true)
+        Button(onClick = {
+            val parsed = runCatching { URI(url) }.getOrNull()
+            if (parsed?.scheme == "wss" && parsed.path == "/ws" && parsed.host != null && parsed.port > 0 && fingerprint.length == 64) {
+                val endpoint = DiscoveredServer("remote:$name", name, name, parsed.host, parsed.port, true, fingerprint, true)
+                AppRepository.addRemoteEndpoint(endpoint)
+                RemoteEndpointStoreHolder.save(endpoint)
+                name = ""; url = ""; fingerprint = ""
+            }
+        }, enabled = name.isNotBlank() && url.isNotBlank() && fingerprint.length == 64, modifier = Modifier.fillMaxWidth()) { Text("Salvar endpoint") }
+    }
+}
+
+private object RemoteEndpointStoreHolder {
+    private var store: DeviceStore? = null
+    fun initialize(context: android.content.Context) { store = DeviceStore(context) }
+    fun save(endpoint: DiscoveredServer) { store?.saveEndpoints(AppRepository.state.value.servers.filter(DiscoveredServer::remote) + endpoint) }
 }
 
 @Composable
