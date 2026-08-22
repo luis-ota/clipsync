@@ -21,7 +21,7 @@ sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$VERSION\"/" 
 sed -i -E "s/orElse\(\"[0-9]+\.[0-9]+\.[0-9]+\"\)/orElse(\"$VERSION\")/" \
   "$ROOT/android/app/build.gradle.kts"
 
-# Keep Cargo.lock aligned without compiling unrelated platform-specific crates.
-cargo update --workspace --offline --manifest-path "$ROOT/Cargo.toml"
+# Refresh local workspace versions in the lockfile without resolving dependencies.
+cargo update -p clipsync-core --precise "$VERSION" --offline --manifest-path "$ROOT/Cargo.toml" >/dev/null
 
 printf 'release version set to %s\n' "$VERSION"
