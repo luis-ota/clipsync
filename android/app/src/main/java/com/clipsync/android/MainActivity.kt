@@ -2,6 +2,7 @@ package com.clipsync.android
 
 import android.Manifest
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -37,6 +38,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -55,6 +57,8 @@ import com.clipsync.android.data.PairingDeepLinks
 import java.net.URI
 import com.clipsync.android.service.ClipboardSyncService
 import com.clipsync.android.net.isValidTlsFingerprint
+import com.clipsync.android.data.AppUpdate
+import com.clipsync.android.data.UpdateChecker
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,9 +84,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ClipSyncApp() {
     val state by AppRepository.state.collectAsStateWithLifecycle()
+    var update by remember { mutableStateOf<AppUpdate?>(null) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        update = UpdateChecker.latest()
     }
     MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(
         primary = Color(0xFFB43B22), secondary = Color(0xFF1E6654),
@@ -93,6 +99,7 @@ private fun ClipSyncApp() {
                 Text("CLIPSYNC", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 Text("Clipboard na sua rede", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(20.dp))
+                update?.let { UpdateCard(it) }
                 StatusCard(state)
                 state.lastRemoteItem?.let { item ->
                     Spacer(Modifier.height(8.dp))
@@ -114,10 +121,31 @@ private fun ClipSyncApp() {
                 }
                 Spacer(Modifier.weight(1f))
                 Text(
-                    "Android 10+ permite ler o clipboard somente com o app em primeiro plano. A notificacao mantem a conexao e o recebimento remoto, mas nao contorna essa regra.",
+                    "Versao ${BuildConfig.VERSION_NAME}. Android 10+ permite ler o clipboard somente com o app em primeiro plano. A notificacao mantem a conexao e o recebimento remoto, mas nao contorna essa regra.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UpdateCard(update: AppUpdate) {
+    val context = LocalContext.current
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFE6B8)),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Atualizacao disponivel", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text("A versao ${update.version} do ClipSync ja esta disponivel.")
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl)))
+            }) {
+                Text("Baixar APK novo")
             }
         }
     }
