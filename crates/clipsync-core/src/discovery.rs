@@ -61,7 +61,13 @@ impl Discovery {
     /// Retorna erro se não for possível determinar o IP local (por
     /// exemplo, sem conectividade de rede), evitando anunciar
     /// `127.0.0.1` que seria inacessível para outros hosts.
-    pub fn announce(&self, name: &str, port: u16, server_id: &DeviceId) -> Result<()> {
+    pub fn announce(
+        &self,
+        name: &str,
+        port: u16,
+        server_id: &DeviceId,
+        tls_fingerprint: Option<&str>,
+    ) -> Result<()> {
         let instance = sanitize_instance(name);
         let host = format!("{instance}.local");
         let type_full = SERVICE_TYPE;
@@ -73,6 +79,18 @@ impl Discovery {
             ("protocol", format!("v{}", crate::PROTOCOL_VERSION)),
             ("version", env!("CARGO_PKG_VERSION").to_owned()),
             ("server_id", server_id.to_string()),
+            (
+                "tls",
+                if tls_fingerprint.is_some() {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            ),
+            (
+                "tls_fingerprint",
+                tls_fingerprint.unwrap_or_default().to_owned(),
+            ),
             ("platform", "linux".to_owned()),
             ("cap_text", "1".to_owned()),
             ("cap_image", "1".to_owned()),

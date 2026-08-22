@@ -39,7 +39,8 @@ app/src/main/java/com/clipsync/android/
 2. **Descoberta**: cada rede inicia uma nova época de browse mDNS. Resultados
    anteriores são descartados; o endpoint selecionado é sempre resolvido pelo
    `server_id` no mapa da época atual.
-3. **Conexão**: `ws://<ip>:<porta>/ws`, envia `hello` com
+3. **Conexão**: `wss://<ip>:<porta>/ws`, após validar `tls=1` e o
+   `tls_fingerprint` do TXT mDNS, envia `hello` com
    `device.name`, `device.kind = "android"` e `device.id` (salvo).
 4. **Pareamento** (se necessário):
    - Recebe `pair_challenge` → mostra o PIN na UI (6 dígitos).
@@ -107,8 +108,9 @@ em redes Wi-Fi (multicast bloqueado por padrão no Android).
 
 ## Segurança
 
-- v0.1: sem TLS. Para uso fora de rede confiável, espere a v0.2
-  (TLS + AES-GCM) ou use uma VLAN/rota criptografada.
+- v1: `wss://` obrigatório para o cliente atual. O certificado autoassinado
+  é validado pelo fingerprint `tls_fingerprint` anunciado no TXT mDNS; não há
+  downgrade silencioso para `ws://`.
 - O PIN exibido pelo daemon (`clipsyncd show-pin`) tem TTL curto
   (default 120s) — force o usuário a digitar rápido.
 

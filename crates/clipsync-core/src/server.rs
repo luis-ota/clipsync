@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -96,15 +96,56 @@ impl Server {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(Error::Io)?;
-        info!(bind = %addr, name = %self.config.name, "servidor WebSocket escutando");
+        info!(bind = %addr, name = %self.config.name, transport = ?self.config.security.transport, "servidor WebSocket escutando");
+        match self.config.security.transport {
+            crate::config::Transport::PlaintextLegacy => {
+                warn!("transporte plaintext_legacy habilitado explicitamente; tráfego não é confidencial");
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(self.state.shutdown.clone().cancelled_owned())
+                .await
+                .map_err(|e| Error::Http(e.to_string()))
+            }
+            crate::config::Transport::Tls => self.run_tls(listener, app).await,
+        }
+    }
 
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(self.state.shutdown.clone().cancelled_owned())
-        .await
-        .map_err(|e| Error::Http(e.to_string()))
+    async fn run_tls(&self, listener: tokio::net::TcpListener, app: Router) -> Result<()> {
+        use axum::extract::connect_info::ConnectInfo;
+        use hyper::service::service_fn;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::server::conn::auto::Builder;
+        use tokio_rustls::TlsAcceptor;
+        let identity = crate::tls::Identity::load_or_generate(&self.config.security)?;
+        let acceptor = TlsAcceptor::from(identity.server_config()?);
+        info!(fingerprint = %identity.fingerprint, "TLS ativo; fingerprint para pinning");
+        loop {
+            tokio::select! {
+                _ = self.state.shutdown.cancelled() => return Ok(()),
+                accepted = listener.accept() => {
+                    let (stream, addr) = accepted.map_err(Error::Io)?;
+                    let acceptor = acceptor.clone();
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        let tls = match acceptor.accept(stream).await {
+                            Ok(stream) => stream,
+                            Err(error) => { debug!(%addr, %error, "falha no handshake TLS"); return; }
+                        };
+                        let service = service_fn(move |mut request| {
+                            let mut app = app.clone().into_service();
+                            request.extensions_mut().insert(ConnectInfo(addr));
+                            async move { tower::ServiceExt::oneshot(&mut app, request).await }
+                        });
+                        let builder = Builder::new(TokioExecutor::new());
+                        if let Err(error) = builder.serve_connection_with_upgrades(TokioIo::new(tls), service).await {
+                            debug!(%addr, %error, "conexão TLS encerrada");
+                        }
+                    });
+                }
+            }
+        }
     }
 
     /// Monta o Router axum (endpoints `/ws` e `/healthz`).

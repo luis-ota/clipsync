@@ -12,6 +12,8 @@ data class DiscoveredServer(
     val name: String,
     val host: String,
     val port: Int,
+    val tls: Boolean = true,
+    val tlsFingerprint: String? = null,
 ) {
     val id: String get() = serverId ?: "legacy:$serviceName"
 }

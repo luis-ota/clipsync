@@ -86,7 +86,22 @@ async fn cmd_run(config: Config, no_tray: bool) -> Result<(), Box<dyn std::error
     let discovery = Discovery::new()?;
     let port = server_config.port();
     let daemon_id = server_config.device_id.clone();
-    if let Err(e) = discovery.announce(&server_config.name, port, &daemon_id) {
+    let tls_identity = if matches!(
+        server_config.security.transport,
+        clipsync_core::config::Transport::Tls
+    ) {
+        Some(clipsync_core::tls::Identity::load_or_generate(
+            &server_config.security,
+        )?)
+    } else {
+        None
+    };
+    if let Err(e) = discovery.announce(
+        &server_config.name,
+        port,
+        &daemon_id,
+        tls_identity.as_ref().map(|i| i.fingerprint.as_str()),
+    ) {
         warn!(error = %e, "falha anunciando serviço mDNS");
     }
 

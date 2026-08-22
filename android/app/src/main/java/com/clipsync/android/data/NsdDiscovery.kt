@@ -95,6 +95,8 @@ class NsdDiscovery(context: Context, private val onChanged: (DiscoverySnapshot) 
                     name = serviceInfo.attributes["name"]?.toString(Charsets.UTF_8) ?: serviceInfo.serviceName,
                     host = host.substringBefore('%'),
                     port = serviceInfo.port,
+                    tls = serviceInfo.attributes["tls"]?.toString(Charsets.UTF_8) == "1",
+                    tlsFingerprint = serviceInfo.attributes["tls_fingerprint"]?.toString(Charsets.UTF_8),
                 )
                 servers[serviceInfo.serviceName] = server
                 publish(resolveEpoch)

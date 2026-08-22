@@ -9,7 +9,7 @@ do usuário e os apps Android conectam via WebSocket.
 ```
 ┌───────────────────────┐        LAN        ┌───────────────────────┐
 │  Android (app)        │ ◄──── WebSocket ──► │  Arch Linux (daemon) │
-│  · clipboard service  │      ws://:8765    │  · clipsyncd          │
+│  · clipboard service  │      wss://:8765   │  · clipsyncd          │
 │  · NsdManager browse  │                    │  · wl-copy/wl-paste  │
 │  · WebSocket client   │   mDNS discovery   │  · mDNS announce      │
 └───────────────────────┘   _clipsync._tcp   └───────────────────────┘
@@ -120,6 +120,6 @@ pairing_timeout_secs = 120
 | Versão | Escopo |
 |--------|--------|
 | v0.1   | Texto + imagens inline (base64), pairing PIN, mDNS, daemon CLI |
-| v0.2   | TLS + criptografia AES-GCM, rich text (HTML) |
+| v1     | TLS autoassinado com pinning mDNS, rich text (HTML) |
 | v0.3   | Frames binários para arquivos grandes, sincronização de arquivos |
 | v1.0   | Android no F-Droid, notification actions, multi-display |
