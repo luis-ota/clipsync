@@ -1,7 +1,7 @@
 # Deploy do relay
 
-O processo de produção é o binário `clipsyncd` em modo headless. Não existe um
-binário separado chamado `relay`.
+O processo de produção é o binário `clipsync-relay`. O daemon `clipsyncd` é um
+processo diferente, destinado ao clipboard local, e não deve ser usado neste deploy.
 
 ## Contrato operacional
 
@@ -21,7 +21,8 @@ Troque o `device_id` de exemplo por um UUID único por instalação antes do
 primeiro start; isso permite montar o TOML como somente leitura.
 
 O arquivo pode ser escolhido por `--config PATH` ou `CLIPSYNC_CONFIG`. Variáveis
-operacionais têm precedência sobre o arquivo:
+operacionais têm precedência sobre o arquivo. O relay recusa iniciar sem
+`CLIPSYNC_RELAY_TOKEN`, `CLIPSYNC_RELAY_ACCOUNT_ID` e `CLIPSYNC_RELAY_DEVICE_ID`.
 
 | Variável | Campo |
 | --- | --- |
@@ -46,19 +47,21 @@ clipsyncd validate-config --config /etc/clipsync/config.toml
 ## systemd
 
 Crie o usuário/grupo `clipsync`, instale o binário em
-`/usr/local/bin/clipsyncd`, o TOML em `/etc/clipsync/config.toml` e o estado em
+`/usr/local/bin/clipsync-relay`, o TOML em `/etc/clipsync/config.toml` e o estado em
 `/var/lib/clipsync`. Depois:
 
 ```bash
 sudo install -m 0644 deploy/systemd/clipsyncd.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now clipsyncd
-curl --fail http://127.0.0.1:8765/readyz
+curl --fail --insecure https://127.0.0.1:8765/readyz
 ```
 
+Crie `/etc/clipsync/relay.env` com as três variáveis `CLIPSYNC_RELAY_*`
+obrigatórias antes de iniciar o unit.
+
 O unit não usa `clipsyncd service-install`: esse comando gera um unit de sessão
-do desktop e não é apropriado para um relay headless. O `--no-tray` e o nome do
-binário acima são a interface existente do projeto.
+do desktop e não é apropriado para um relay headless.
 
 ## Docker Compose
 
@@ -77,18 +80,10 @@ sincronizar o clipboard local do host.
 ## TLS no reverse proxy
 
 [`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile) é um exemplo mínimo de
-terminação TLS. Nesse desenho, mantenha o backend isolado na rede privada e
-configure o TOML ou ambiente com:
+terminação TLS. O backend também permanece TLS; monte o certificado DER do relay
+em `/etc/caddy/tls/relay-cert.der` para validar o hop interno:
 
-```text
-CLIPSYNC_BIND=0.0.0.0:8765
-CLIPSYNC_SECURITY_TRANSPORT=plaintext_legacy
-```
-
-Isso é aceitável somente no segmento privado entre proxy e container. Para
-TLS também no hop interno, mantenha `transport = "tls"`, configure as paths de
-certificado no TOML e use `https://clipsyncd:8765` no proxy com validação da CA.
-Não publique a porta interna diretamente quando o proxy for a fronteira TLS.
+Não use `tls_insecure_skip_verify` nem altere o relay para `plaintext_legacy`.
 
 O WebSocket exige que o proxy encaminhe `Upgrade` e `Connection`; Caddy faz
 isso automaticamente. O healthcheck deve usar `/readyz`, não `/ws`.

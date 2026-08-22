@@ -1,4 +1,9 @@
-# TLS termina no Caddy; o backend usa plaintext_legacy apenas na rede privada.
+# TLS termina no Caddy e o hop interno continua TLS. Monte o certificado DER
+# do relay em /etc/caddy/tls/relay-cert.der e não desabilite sua validação.
 relay.example.com {
-    reverse_proxy clipsyncd:8765
+    reverse_proxy https://clipsync-relay:8765 {
+        transport http {
+            tls_trust_pool file /etc/caddy/tls/relay-cert.der
+        }
+    }
 }

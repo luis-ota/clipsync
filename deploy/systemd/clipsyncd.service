@@ -1,5 +1,5 @@
 [Unit]
-Description=clipsyncd headless relay
+Description=clipsync TLS relay
 Documentation=https://github.com/luis-ota/clipsync/tree/develop/docs/DEPLOY.md
 After=network-online.target
 Wants=network-online.target
@@ -8,10 +8,11 @@ Wants=network-online.target
 Type=simple
 User=clipsync
 Group=clipsync
-ExecStart=/usr/local/bin/clipsyncd run --no-tray --config /etc/clipsync/config.toml
+ExecStart=/usr/local/bin/clipsync-relay --config /etc/clipsync/config.toml
 Restart=on-failure
 RestartSec=5s
-Environment=RUST_LOG=clipsync_core=info,clipsyncd=info
+Environment=RUST_LOG=clipsync_core=info,clipsync_relay=info
+EnvironmentFile=/etc/clipsync/relay.env
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

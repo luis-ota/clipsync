@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -19,7 +19,7 @@ use axum::routing::get;
 use axum::Router;
 use clipsync_core::protocol::{DeviceId, Message};
 use futures::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
@@ -49,6 +49,7 @@ pub struct RelayConfig {
     pub security: clipsync_core::config::SecurityConfig,
     pub max_message_bytes: usize,
     pub queue_capacity: usize,
+    pub limits: clipsync_core::config::LimitsConfig,
 }
 
 impl Default for RelayConfig {
@@ -62,7 +63,34 @@ impl Default for RelayConfig {
             security,
             max_message_bytes: 8 * 1024 * 1024,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            limits: clipsync_core::config::LimitsConfig::default(),
         }
+    }
+}
+
+impl RelayConfig {
+    /// Constrói a configuração do processo relay a partir do mesmo TOML
+    /// validado pelo daemon, sem duplicar o contrato de configuração.
+    pub fn from_config(config: &clipsync_core::config::Config) -> Result<Self, String> {
+        if !matches!(
+            config.security.transport,
+            clipsync_core::config::Transport::Tls
+        ) {
+            return Err(
+                "relay exige security.transport = \"tls\"; plaintext não é suportado".into(),
+            );
+        }
+        let max_message_bytes = config.clipboard.max_websocket_message_bytes();
+        if max_message_bytes == 0 {
+            return Err("limite de mensagem do relay não pode ser zero".into());
+        }
+        Ok(Self {
+            bind: config.bind.clone(),
+            security: config.security.clone(),
+            max_message_bytes,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            limits: config.limits.clone(),
+        })
     }
 }
 
@@ -73,9 +101,99 @@ struct Session {
     tx: mpsc::Sender<Arc<Message>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RelayState {
     sessions: RwLock<HashMap<String, Session>>,
+    admission: RelayAdmission,
+}
+
+#[derive(Debug)]
+struct RelayAdmission {
+    active: std::sync::atomic::AtomicUsize,
+    windows: Mutex<HashMap<std::net::IpAddr, Window>>,
+    limits: clipsync_core::config::LimitsConfig,
+}
+
+#[derive(Debug)]
+struct Window {
+    started: Instant,
+    messages: u32,
+    bytes: u64,
+}
+
+impl Default for RelayState {
+    fn default() -> Self {
+        Self::with_limits(clipsync_core::config::LimitsConfig {
+            max_connections: 0,
+            messages_per_minute: 0,
+            bytes_per_minute: 0,
+        })
+    }
+}
+
+impl RelayState {
+    fn with_limits(limits: clipsync_core::config::LimitsConfig) -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            admission: RelayAdmission {
+                active: std::sync::atomic::AtomicUsize::new(0),
+                windows: Mutex::new(HashMap::new()),
+                limits,
+            },
+        }
+    }
+
+    fn try_connection(&self) -> bool {
+        let n = self
+            .admission
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if self.admission.limits.max_connections != 0 && n > self.admission.limits.max_connections {
+            self.admission
+                .active
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            false
+        } else {
+            true
+        }
+    }
+
+    fn release_connection(&self) {
+        self.admission
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn allow_message(&self, ip: std::net::IpAddr, bytes: usize) -> bool {
+        let limits = &self.admission.limits;
+        if limits.messages_per_minute == 0 && limits.bytes_per_minute == 0 {
+            return true;
+        }
+        let mut windows = self.admission.windows.lock().await;
+        let now = Instant::now();
+        let window = windows.entry(ip).or_insert(Window {
+            started: now,
+            messages: 0,
+            bytes: 0,
+        });
+        if now.duration_since(window.started) >= Duration::from_secs(60) {
+            *window = Window {
+                started: now,
+                messages: 0,
+                bytes: 0,
+            };
+        }
+        let allowed = (limits.messages_per_minute == 0
+            || window.messages < limits.messages_per_minute)
+            && (limits.bytes_per_minute == 0
+                || window.bytes.saturating_add(bytes as u64) <= limits.bytes_per_minute);
+        if allowed {
+            window.messages += 1;
+            window.bytes = window.bytes.saturating_add(bytes as u64);
+        }
+        allowed
+    }
 }
 
 impl RelayState {
@@ -160,9 +278,10 @@ impl std::fmt::Debug for RelayServer {
 impl RelayServer {
     pub fn new(config: RelayConfig, verifier: Arc<dyn TokenVerifier>) -> Self {
         assert!(config.queue_capacity > 0, "queue capacity must be positive");
+        let state = Arc::new(RelayState::with_limits(config.limits.clone()));
         Self {
             config,
-            state: Arc::new(RelayState::default()),
+            state,
             verifier,
             shutdown: CancellationToken::new(),
         }
@@ -171,6 +290,7 @@ impl RelayServer {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/healthz", get(healthz))
+            .route("/readyz", get(readyz))
             .route("/ws", get(ws_handler))
             .with_state(Arc::new(self.clone_for_router()))
     }
@@ -244,21 +364,44 @@ async fn healthz(State(state): State<Arc<RouterState>>) -> impl IntoResponse {
     )
 }
 
+async fn readyz(State(state): State<Arc<RouterState>>) -> impl IntoResponse {
+    if state.shutdown.is_cancelled() {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "clipsync relay not ready\n",
+        )
+    } else {
+        (StatusCode::OK, "clipsync relay ready\n")
+    }
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<RouterState>>,
     headers: HeaderMap,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> Response {
+    if !state.state.try_connection() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "connection quota exceeded\n",
+        )
+            .into_response();
+    }
     let Some(value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
+        state.state.release_connection();
         return (StatusCode::UNAUTHORIZED, "authorization required\n").into_response();
     };
     let Some(token) = value.strip_prefix("Bearer ") else {
+        state.state.release_connection();
         return (StatusCode::UNAUTHORIZED, "bearer token required\n").into_response();
     };
     let identity = match state.verifier.verify(token).await {
         Ok(identity) => identity,
-        Err(_) => return (StatusCode::UNAUTHORIZED, "token rejected\n").into_response(),
+        Err(_) => {
+            state.state.release_connection();
+            return (StatusCode::UNAUTHORIZED, "token rejected\n").into_response();
+        }
     };
     let config = state.config.clone();
     ws.max_message_size(config.max_message_bytes)
@@ -300,8 +443,9 @@ async fn connection(
             }
         }
     });
-    let _ = relay_loop(&mut stream, &state, &identity, &tx, &shutdown).await;
+    let _ = relay_loop(&mut stream, &state, &identity, &tx, &shutdown, peer.ip()).await;
     state.detach(&session_id).await;
+    state.release_connection();
     writer.abort();
     let _ = writer.await;
 }
@@ -312,6 +456,7 @@ async fn relay_loop<S>(
     identity: &RelayIdentity,
     own_tx: &mpsc::Sender<Arc<Message>>,
     shutdown: &CancellationToken,
+    peer: std::net::IpAddr,
 ) -> Result<(), ()>
 where
     S: StreamExt<Item = Result<WsMessage, axum::Error>> + Unpin,
@@ -321,7 +466,7 @@ where
         first = tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.next()) => first.map_err(|_| ())?,
     };
     if let Some(frame) = first {
-        handle_frame(frame.map_err(|_| ())?, state, identity, own_tx).await?;
+        handle_frame(frame.map_err(|_| ())?, state, identity, own_tx, peer).await?;
     } else {
         return Ok(());
     }
@@ -333,7 +478,7 @@ where
         let Some(frame) = frame else {
             return Ok(());
         };
-        handle_frame(frame.map_err(|_| ())?, state, identity, own_tx).await?;
+        handle_frame(frame.map_err(|_| ())?, state, identity, own_tx, peer).await?;
     }
 }
 
@@ -342,6 +487,7 @@ async fn handle_frame(
     state: &Arc<RelayState>,
     identity: &RelayIdentity,
     own_tx: &mpsc::Sender<Arc<Message>>,
+    peer: std::net::IpAddr,
 ) -> Result<(), ()> {
     match frame {
         WsMessage::Text(text) => match serde_json::from_str::<Message>(&text) {
@@ -356,6 +502,10 @@ async fn handle_frame(
             }
             Ok(Message::Pong { .. }) => Ok(()),
             Ok(message) => {
+                let bytes = text.len();
+                if !state.allow_message(peer, bytes).await {
+                    return Err(());
+                }
                 state.route(identity, message).await;
                 Ok(())
             }
@@ -442,5 +592,36 @@ mod tests {
         assert_eq!(state.len().await, 1);
         state.detach(&new_id).await;
         assert_eq!(state.len().await, 0);
+    }
+
+    #[test]
+    fn relay_config_deserializes_limits_and_derives_message_limit() {
+        let mut config = clipsync_core::config::Config::default();
+        config.limits.max_connections = 7;
+        config.limits.messages_per_minute = 11;
+        config.limits.bytes_per_minute = 1234;
+        let relay = RelayConfig::from_config(&config).unwrap();
+        assert_eq!(relay.limits.max_connections, 7);
+        assert_eq!(relay.limits.messages_per_minute, 11);
+        assert_eq!(relay.limits.bytes_per_minute, 1234);
+        assert_eq!(
+            relay.max_message_bytes,
+            config.clipboard.max_websocket_message_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_enforces_connection_and_message_limits() {
+        let state = RelayState::with_limits(clipsync_core::config::LimitsConfig {
+            max_connections: 1,
+            messages_per_minute: 1,
+            bytes_per_minute: 4,
+        });
+        assert!(state.try_connection());
+        assert!(!state.try_connection());
+        assert!(state.allow_message("127.0.0.1".parse().unwrap(), 4).await);
+        assert!(!state.allow_message("127.0.0.1".parse().unwrap(), 1).await);
+        state.release_connection();
+        assert!(state.try_connection());
     }
 }
