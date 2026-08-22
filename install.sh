@@ -27,6 +27,10 @@ if [ "$asset_os" = linux ]; then
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT INT TERM
   curl -fL --retry 3 -o "$tmp/$asset" "$url"
+  curl -fL --retry 3 -o "$tmp/SHA256SUMS" \
+    "https://github.com/$REPO/releases/download/$tag/SHA256SUMS"
+  awk -v file="$asset" '$2 == file { print }' "$tmp/SHA256SUMS" \
+    | (cd "$tmp" && sha256sum -c -)
   mkdir -p "$tmp/unpacked" "$INSTALL_DIR"
   tar -xzf "$tmp/$asset" -C "$tmp/unpacked"
   install -m 0755 "$tmp/unpacked/usr/bin/clipsyncd" "$INSTALL_DIR/clipsyncd"

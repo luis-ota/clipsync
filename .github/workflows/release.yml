@@ -57,6 +57,10 @@ jobs:
         run: |
           cargo test --workspace --no-fail-fast
           packaging/build-release.sh "$RUNNER_TEMP/clipsync-dist"
+          sed "s/^pkgver=.*/pkgver=${{ needs.metadata.outputs.version }}/" \
+            packaging/PKGBUILD > "$RUNNER_TEMP/clipsync-dist/PKGBUILD"
+          cp packaging/flatpak/org.clipsync.Clipsyncd.yml \
+            "$RUNNER_TEMP/clipsync-dist/org.clipsync.Clipsyncd.yml"
           packaging/smoke-test.sh "$RUNNER_TEMP/clipsync-dist"
       - uses: actions/upload-artifact@v4
         with:
