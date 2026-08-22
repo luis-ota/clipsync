@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arboard",
  "base64",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "arboard",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-harness"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "clipsync-core",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-relay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "clipsyncd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arboard",
  "axum",

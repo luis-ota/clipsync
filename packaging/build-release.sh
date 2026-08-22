@@ -20,6 +20,10 @@ install -m 0644 "$ROOT/README.md" "$ROOT/docs/DEPLOY.md" "$OUT/stage/usr/share/d
 install -m 0644 "$ROOT/LICENSE" "$OUT/stage/usr/share/licenses/clipsync/"
 
 tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+  -C "$OUT/stage" -czf "$OUT/clipsync-${VERSION}-linux-x86_64.tar.gz" .
+
+tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+  --transform="s,^,clipsync-${VERSION}/," \
   --exclude='./target' --exclude='./dist' --exclude='./.git' \
   -C "$ROOT" -czf "$OUT/clipsync-${VERSION}.tar.gz" .
 

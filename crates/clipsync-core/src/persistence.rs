@@ -14,6 +14,8 @@ pub(crate) fn atomic_write_with_mode(
     contents: &[u8],
     mode: Option<u32>,
 ) -> io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = mode;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 

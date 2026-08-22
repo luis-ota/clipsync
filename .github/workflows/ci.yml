@@ -3,6 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+
+permissions:
+  contents: read
+  checks: write
   pull_request:
     branches: [main]
 
@@ -79,9 +83,12 @@ jobs:
         run: packaging/smoke-test.sh "$RUNNER_TEMP/clipsync-dist"
 
       - name: Validate Arch package metadata
-        if: matrix.name == 'arch'
-        working-directory: packaging
-        run: makepkg --printsrcinfo
+       if: matrix.name == 'arch'
+       working-directory: packaging
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -s /bin/bash -c "cd '$GITHUB_WORKSPACE/packaging' && makepkg --printsrcinfo"
 
       - name: Validate Flatpak manifest when available
         if: matrix.name == 'ubuntu' || matrix.name == 'debian'

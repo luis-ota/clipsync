@@ -136,6 +136,8 @@ fn require_private_permissions(path: &Path) -> Result<()> {
             )));
         }
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

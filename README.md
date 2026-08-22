@@ -123,6 +123,20 @@ testa as quatro famílias sem depender de desktop ou Android.
 
 ## Instalação (daemon)
 
+### Instalador rápido Linux
+
+O instalador busca a última GitHub Release, baixa o bundle correspondente à
+arquitetura e instala `clipsyncd` e `clipsync-relay` em `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/luis-ota/clipsync/main/install.sh | sh
+```
+
+Para fixar uma versão: `curl -fsSL .../install.sh | CLIPSYNC_VERSION=v0.1.1 sh`.
+O script não usa credenciais e não executa código baixado além dos binários
+publicados na Release. macOS e Windows usam os instaladores/artefatos da página
+da Release.
+
 ### Arch Linux
 
 ```bash

@@ -37,26 +37,28 @@ class ProtocolCodecTest {
         val message = Message.ClipboardText("text/plain", "segredo", "device", "hash")
         val envelope = RelayCrypto.encrypt(message, key, "session", "device", 1)
         assertEquals(message, RelayCrypto.decrypt(envelope, key))
-        assertThrows { RelayCrypto.decrypt(envelope.copy(sequence = 2), key) }
-        assertThrows { RelayCrypto.decrypt(envelope, "v1 group-1 " + "22".repeat(32)) }
+        assertThrows("sequence") { RelayCrypto.decrypt(envelope.copy(sequence = 2), key) }
+        assertThrows("key") { RelayCrypto.decrypt(envelope, "v1 group-1 " + "22".repeat(32)) }
         val tampered = envelope.copy(payload = envelope.payload.copy(ciphertext = "A" + envelope.payload.ciphertext.drop(1)))
-        assertThrows { RelayCrypto.decrypt(tampered, key) }
+        assertThrows("tamper") { RelayCrypto.decrypt(tampered, key) }
     }
     @Test fun `relay rejeita grupo ou nonce hexadecimal invalido`() {
         val key = "v1 group-1 " + "11".repeat(32)
         val envelope = RelayCrypto.encrypt(Message.Ping(1), key, "session", "device", 1)
-        assertThrows { RelayCrypto.decrypt(envelope.copy(group = "other"), key) }
-        assertThrows { RelayCrypto.decrypt(envelope.copy(payload = envelope.payload.copy(nonce = "0")), key) }
+        assertThrows("group") { RelayCrypto.decrypt(envelope.copy(group = "other"), key) }
+        assertThrows("nonce") { RelayCrypto.decrypt(envelope.copy(payload = envelope.payload.copy(nonce = "0")), key) }
     }
     @Test fun `frame binario CSB1 faz round trip e respeita bounds`() {
         val chunk = BinaryTransferChunk(ByteArray(16) { it.toByte() }, 0, 1, 3, byteArrayOf(1, 2, 3))
         assertEquals(chunk.data.toList(), BinaryTransferCodec.decode(BinaryTransferCodec.encode(chunk)).data.toList())
-        assertThrows {
+        assertThrows("chunk bound") {
             BinaryTransferCodec.encode(chunk.copy(data = ByteArray(BinaryTransferCodec.MAX_CHUNK_BYTES + 1)))
         }
-        assertThrows {
+        assertThrows("magic") {
             BinaryTransferCodec.decode(BinaryTransferCodec.encode(chunk).copyOf().also { it[0] = 'X'.code.toByte() })
         }
     }
-    private fun assertThrows(block: () -> Unit) { runCatching(block).onSuccess { error("esperava falha") } }
+    private fun assertThrows(label: String, block: () -> Unit) {
+        runCatching(block).onSuccess { error("esperava falha: $label") }
+    }
 }

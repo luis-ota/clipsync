@@ -13,8 +13,14 @@ grep -q '^StateDirectory=clipsync$' "$SERVICE"
 grep -q '^ConfigurationDirectory=clipsync$' "$SERVICE"
 ! grep -Eq '/(usr|etc|var)/(local/)?bin|/etc/clipsync|/var/lib/clipsync' "$SERVICE"
 grep -q '^install -m 0755' "$ROOT/packaging/build-release.sh"
-if [ -n "$DIST" ] && [ -f "$DIST"/clipsync_0.1.0_amd64.deb ]; then
-  contents=$(dpkg-deb --contents "$DIST/clipsync_0.1.0_amd64.deb")
+deb=''
+if [ -n "$DIST" ]; then
+  for candidate in "$DIST"/clipsync_*_amd64.deb; do
+    if [ -f "$candidate" ]; then deb="$candidate"; break; fi
+  done
+fi
+if [ -n "$deb" ]; then
+  contents=$(dpkg-deb --contents "$deb")
   grep -Eq 'usr/bin/clipsync(d|-relay)$' <<<"$contents"
   grep -Eq '^-rwxr-xr-x .*usr/bin/clipsyncd$' <<<"$contents"
   grep -Eq '^-.+etc/clipsync/config.toml$' <<<"$contents"

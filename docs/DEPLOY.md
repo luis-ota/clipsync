@@ -15,9 +15,9 @@ esse formato.
 ```bash
 packaging/smoke-test.sh
 packaging/build-release.sh dist
-sudo apt install ./dist/clipsync_0.1.0_amd64.deb       # Debian/Ubuntu
-sudo dnf install ./dist/clipsync-0.1.0-1.*.rpm         # Fedora, se gerado
-cp dist/clipsync-0.1.0.tar.gz packaging/               # fonte para o PKGBUILD
+sudo apt install ./dist/clipsync_<version>_amd64.deb   # Debian/Ubuntu
+sudo dnf install ./dist/clipsync-<version>-1.*.rpm     # Fedora, se gerado
+cp dist/clipsync-<version>.tar.gz packaging/            # fonte para o PKGBUILD
 (cd packaging && makepkg)                              # Arch
 ```
 
