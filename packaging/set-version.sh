@@ -21,7 +21,19 @@ sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$VERSION\"/" 
 sed -i -E "s/orElse\(\"[0-9]+\.[0-9]+\.[0-9]+\"\)/orElse(\"$VERSION\")/" \
   "$ROOT/android/app/build.gradle.kts"
 
-# Refresh local workspace versions in the lockfile without resolving dependencies.
-cargo update -p clipsync-core --precise "$VERSION" --offline --manifest-path "$ROOT/Cargo.toml" >/dev/null
+# Sync only local workspace package versions; do not resolve the dependency index.
+lock_tmp=$(mktemp)
+awk -v version="$VERSION" '
+  /^name = "(clipsync-client|clipsync-core|clipsync-harness|clipsync-relay|clipsyncd)"$/ {
+    print
+    if (getline && $0 ~ /^version = "/) {
+      sub(/^version = "[^"]+"/, "version = \"" version "\"")
+    }
+    print
+    next
+  }
+  { print }
+' "$ROOT/Cargo.lock" > "$lock_tmp"
+mv "$lock_tmp" "$ROOT/Cargo.lock"
 
 printf 'release version set to %s\n' "$VERSION"
