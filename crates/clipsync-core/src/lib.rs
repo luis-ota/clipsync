@@ -14,6 +14,7 @@
 #![warn(missing_debug_implementations)]
 #![warn(unreachable_pub)]
 
+pub mod auth;
 pub mod clipboard;
 pub mod config;
 pub mod discovery;
@@ -28,6 +29,7 @@ pub mod state;
 pub mod tls;
 pub mod transport;
 
+pub use auth::{GroupId, Principal, ServerId, SessionCredential, SessionId, UserId};
 pub use error::{Error, Result};
 pub use protocol::{DeviceId, DeviceInfo, DeviceKind, Message};
 
