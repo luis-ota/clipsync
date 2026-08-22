@@ -153,6 +153,12 @@ class ProtocolEngine(private val device: DeviceInfo) {
         is Message.Ping -> listOf(ProtocolAction.Send(Message.Pong(message.ts)))
         is Message.ClipboardText, is Message.ClipboardImage, is Message.ClipboardHtml ->
             listOf(ProtocolAction.Clipboard(message))
+        is Message.TransferOffer -> listOf(
+            // File writes are opt-in. The UI can replace this with an
+            // explicit TransferAccept once the user confirms the offer.
+            ProtocolAction.Send(Message.TransferReject(message.transfer_id, "user_confirmation_required")),
+        )
+        is Message.TransferAccept, is Message.TransferReject, is Message.TransferComplete -> emptyList()
         is Message.Error -> listOf(ProtocolAction.FatalError(message.message))
         is Message.Hello, is Message.PairSubmit, is Message.Pong -> emptyList()
     }

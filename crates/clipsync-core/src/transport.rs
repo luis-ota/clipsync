@@ -21,6 +21,7 @@ use crate::peer::PeerSession;
 use crate::protocol::{DeviceId, DeviceInfo, Message, PROTOCOL_VERSION};
 use crate::server::ServerConfig;
 use crate::state::SharedState;
+use crate::transfer::BinaryChunk;
 
 /// Limite de tamanho de um frame binário (256 MiB, usado em v0.3
 /// para arquivos).
@@ -413,7 +414,8 @@ impl ConnectionInner {
                         max: MAX_BINARY_FRAME,
                     });
                 }
-                debug!(peer = %self.addr, size = data.len(), "frame binário recebido (v0.3)");
+                BinaryChunk::decode(&data).map_err(|e| Error::Protocol(e.to_string()))?;
+                debug!(peer = %self.addr, size = data.len(), "chunk binário recebido");
                 Ok(ControlFlow::Continue(()))
             }
             WsMessage::Ping(_) | WsMessage::Pong(_) => Ok(ControlFlow::Continue(())),
@@ -468,6 +470,16 @@ impl ConnectionInner {
             Message::ClipboardText { .. } => caps.sync_text,
             Message::ClipboardImage { .. } => caps.sync_images,
             Message::ClipboardHtml { .. } => caps.sync_html,
+            Message::TransferOffer { file, .. } => {
+                if *file {
+                    caps.sync_files
+                } else {
+                    caps.sync_images
+                }
+            }
+            Message::TransferAccept { .. }
+            | Message::TransferReject { .. }
+            | Message::TransferComplete { .. } => caps.sync_files,
             _ => true,
         };
         if enabled {
@@ -503,6 +515,25 @@ impl ConnectionInner {
                     size: html.len(),
                     max: max_text,
                 })
+            }
+            Message::TransferOffer {
+                size,
+                chunks,
+                sha256,
+                ..
+            } => {
+                if *size > crate::transfer::MAX_TRANSFER_BYTES {
+                    return Err(Error::PayloadTooLarge {
+                        size: *size as usize,
+                        max: crate::transfer::MAX_TRANSFER_BYTES as usize,
+                    });
+                }
+                if *chunks == 0 || *chunks > crate::transfer::MAX_CHUNKS || sha256.len() != 64 {
+                    return Err(Error::Protocol(
+                        "metadados de transferência inválidos".into(),
+                    ));
+                }
+                Ok(())
             }
             _ => Ok(()),
         }

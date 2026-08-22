@@ -151,8 +151,24 @@ No servidor, `max_message_size` e `max_frame_size` do WebSocket são calculados
 a partir de `max_image_bytes` e `max_text_bytes`, incluindo a inflação do
 base64, o escaping JSON e 8 KiB de envelope. Os limites específicos de cada
 payload continuam sendo validados depois do parsing.
-> Planejado v0.3: transferência via frames binários WebSocket com
-> hash + id de transferência, evitando base64 para arquivos grandes.
+### Transferência binária
+
+O caminho v1 legado não muda: texto e imagens pequenas continuam em JSON, e
+clientes antigos podem ignorar os novos tipos. Conteúdo grande usa uma oferta
+JSON e, somente depois de `transfer_accept`, frames WebSocket binários:
+
+```json
+{"type":"transfer_offer","transfer_id":"uuid","mime":"application/octet-stream","name":"arquivo.zip","size":1048576,"chunks":16,"sha256":"hex-64-chars","file":true,"origin":"uuid-do-device"}
+{"type":"transfer_accept","transfer_id":"uuid"}
+```
+
+Arquivos (`file=true`) exigem confirmação explícita no Android antes de aceitar;
+o padrão é rejeitar. Cada frame tem envelope `CSB1` de 38 bytes, seguido de no
+máximo 64 KiB de dados. O total é limitado a 256 MiB, chunks são ordenados e o
+receptor grava incrementalmente em arquivo temporário, com memória limitada a
+um chunk. Só publica após conferir tamanho e SHA-256; tamper, repetição ou salto
+de índice abortam a transferência. O remetente aplica backpressure e mantém no
+máximo quatro chunks em voo.
 
 No backend Linux X11, somente `image/png` e `image/jpeg` são aceitos. O daemon
 consulta os alvos anunciados pelo clipboard antes de ler e usa `xclip` com o

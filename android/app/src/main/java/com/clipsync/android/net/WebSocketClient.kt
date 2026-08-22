@@ -15,6 +15,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
@@ -43,6 +44,7 @@ class WebSocketClient(
         fun onConnecting(generation: Long, delayMillis: Long?)
         fun onOpen(generation: Long)
         fun onMessage(generation: Long, payload: String)
+        fun onBinaryMessage(generation: Long, payload: ByteArray) {}
         fun onDisconnected(generation: Long, reason: String)
         fun onSendFailed(generation: Long)
     }
@@ -50,10 +52,12 @@ class WebSocketClient(
     private sealed interface Event {
         data class Connect(val generation: Long, val server: DiscoveredServer) : Event
         data class Send(val generation: Long, val payload: String) : Event
+        data class SendBinary(val generation: Long, val payload: ByteArray) : Event
         data object Disconnect : Event
         data object Shutdown : Event
         data class Opened(val generation: Long, val socket: WebSocket) : Event
         data class Message(val generation: Long, val socket: WebSocket, val payload: String) : Event
+        data class BinaryMessage(val generation: Long, val socket: WebSocket, val payload: ByteArray) : Event
         data class Failed(val generation: Long, val socket: WebSocket, val reason: String) : Event
         data class Retry(val generation: Long) : Event
     }
@@ -88,6 +92,9 @@ class WebSocketClient(
     fun send(payload: String, generation: Long) {
         events.trySend(Event.Send(generation, payload))
     }
+    fun sendBinary(payload: ByteArray, generation: Long) {
+        events.trySend(Event.SendBinary(generation, payload))
+    }
 
     fun disconnect() { events.trySend(Event.Disconnect) }
     fun shutdown() { events.trySend(Event.Shutdown) }
@@ -111,6 +118,10 @@ class WebSocketClient(
                     }
                 }
             }
+            is Event.SendBinary -> if (event.generation == generation) {
+                val current = socket
+                if (current == null || !current.send(ByteString.of(*event.payload))) callbacks.onSendFailed(generation)
+            }
             Event.Disconnect -> {
                 generation++
                 target = null
@@ -125,6 +136,9 @@ class WebSocketClient(
             }
             is Event.Message -> if (isCurrent(event.generation, event.socket)) {
                 callbacks.onMessage(generation, event.payload)
+            }
+            is Event.BinaryMessage -> if (isCurrent(event.generation, event.socket)) {
+                callbacks.onBinaryMessage(generation, event.payload)
             }
             is Event.Failed -> if (isCurrent(event.generation, event.socket)) fail(event.socket, event.reason)
             is Event.Retry -> if (event.generation == generation && target != null) open()
@@ -155,6 +169,9 @@ class WebSocketClient(
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
                 events.trySend(Event.Message(connectionGeneration, webSocket, text))
+            }
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                events.trySend(Event.BinaryMessage(connectionGeneration, webSocket, bytes.toByteArray()))
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 events.trySend(Event.Failed(connectionGeneration, webSocket, reason.ifBlank { "conexao encerrada" }))
