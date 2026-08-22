@@ -60,7 +60,7 @@ jobs:
           if-no-files-found: error
 
   publish-crates:
-    needs: metadata
+    needs: [metadata, linux, android, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -143,7 +143,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [metadata, linux, android, desktop]
+    needs: [metadata, linux, android, desktop, publish-crates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
