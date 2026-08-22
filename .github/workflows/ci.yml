@@ -111,3 +111,17 @@ jobs:
         run: cargo build --release -p clipsync-client
       - name: Test protocol and client
         run: cargo test -p clipsync-core -p clipsync-client --all-targets
+      - name: Validate installer projects
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test -x deploy/macos/build-pkg.sh
+          plutil -lint deploy/macos/Info.plist deploy/macos/com.clipsync.client.plist
+      - name: Validate Windows installer project
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          [xml](Get-Content deploy/windows/AppxManifest.xml) | Out-Null
+          $tokens = $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path deploy/windows/build-msix.ps1), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { throw $errors }

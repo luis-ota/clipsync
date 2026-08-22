@@ -9,6 +9,10 @@ e #62. Ele é um processo foreground, não substitui o `clipsyncd` Linux.
 - Faz handshake v1, pareamento por PIN e reconnect com backoff até 30 segundos.
 - Persiste `device_id` por `server_id` em `desktop-client.json`; vários servidores
   podem coexistir. Use `--server-id` quando um servidor mudar de endereço.
+- Persiste token relay e material E2E por `server_id` no Keychain macOS ou DPAPI
+  Windows. Linux compila, mas recusa fallback em arquivo para esses segredos.
+- `--clipboard auto|text|image` controla a seleção de formato; `auto` tenta texto
+  e usa imagem somente quando texto não está disponível.
 - Usa `arboard` para texto e imagem RGBA/PNG nas plataformas suportadas.
 - Descobre `_clipsync._tcp.local.` via mDNS quando `--url` não é informado.
 - Endpoints manuais usam `--url`; `wss://` exige fingerprint SHA-256 do DER.
@@ -18,7 +22,9 @@ e #62. Ele é um processo foreground, não substitui o `clipsyncd` Linux.
 
 ## Limitações explícitas
 
-- Não há tray, instalador ou serviço em background.
+- O cliente não implementa tray próprio: o tray validado é o do `clipsyncd` Linux.
+  O macOS tem LaunchAgent opt-in e há projetos de `.pkg` e `.msix`; não há
+  assinatura, notarização ou execução automática Windows alegadas.
 - `arboard` não expõe uma API portátil de `text/html` para este cliente; HTML
   recebido usa o fallback plain quando existe. A capability HTML permanece falsa.
 - Imagens são convertidas para PNG RGBA. Formatos ou buffers que não puderem ser
@@ -59,13 +65,14 @@ cargo build --release -p clipsync-client
 ```
 
 Distribua o binário com um atalho/serviço da plataforma se desejar início
-automático. O repositório não fornece instalador, assinatura de código,
-notarização ou configuração de firewall. O estado local contém IDs e endpoints,
-não tokens; tokens devem vir do ambiente ou de um secret store.
+automático. `deploy/macos/build-pkg.sh` gera um `.pkg` a partir de um app bundle
+validado; `deploy/windows/build-msix.ps1` gera um `.msix` com o Windows SDK.
+Os projetos não assinam, notarizam nem configuram firewall. O estado local
+contém IDs e endpoints, não tokens.
 
 ## CI
 
 O job `desktop-clients` executa fmt, clippy, build release e testes do crate/core
-nos runners macOS e Windows. A execução Linux local desta entrega validou apenas
-`cargo check -p clipsync-client`; não constitui build ou teste nativo desses
-sistemas.
+nos runners macOS e Windows e valida os manifests de instalador. A execução
+Linux local valida `cargo check`/testes, mas não constitui teste nativo de
+Keychain/DPAPI.

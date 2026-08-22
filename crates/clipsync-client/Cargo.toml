@@ -20,3 +20,11 @@ tokio-tungstenite.workspace = true
 png.workspace = true
 rustls.workspace = true
 serde.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+tray-item = { version = "0.10", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+tray-item = { version = "0.10", default-features = false }
