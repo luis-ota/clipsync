@@ -21,8 +21,17 @@ Troque o `device_id` de exemplo por um UUID único por instalação antes do
 primeiro start; isso permite montar o TOML como somente leitura.
 
 O arquivo pode ser escolhido por `--config PATH` ou `CLIPSYNC_CONFIG`. Variáveis
-operacionais têm precedência sobre o arquivo. O relay recusa iniciar sem
-`CLIPSYNC_RELAY_TOKEN`, `CLIPSYNC_RELAY_ACCOUNT_ID` e `CLIPSYNC_RELAY_DEVICE_ID`.
+operacionais têm precedência sobre o arquivo. O relay lê credenciais de
+`CLIPSYNC_RELAY_TOKEN_FILE` (padrão `/etc/clipsync/relay.tokens`) e recusa iniciar
+sem esse arquivo.
+
+O formato é uma credencial por linha, com os cinco campos
+`token account device session group`. Gere uma credencial local sem colocá-la no
+`.env`:
+
+```bash
+deploy/generate-relay-credentials.sh deploy/relay.tokens
+```
 
 | Variável | Campo |
 | --- | --- |
@@ -31,6 +40,7 @@ operacionais têm precedência sobre o arquivo. O relay recusa iniciar sem
 | `CLIPSYNC_DISCOVERY_ENABLE_MDNS` | `discovery.enable_mdns` |
 | `CLIPSYNC_SECURITY_TRANSPORT` | `security.transport` (`tls` ou `plaintext_legacy`) |
 | `CLIPSYNC_SECURITY_LOCAL_ONLY` | `security.local_only` |
+| `CLIPSYNC_RELAY_TOKEN_FILE` | arquivo de credenciais do relay |
 | `CLIPSYNC_LIMITS_MAX_CONNECTIONS` | `limits.max_connections` |
 | `CLIPSYNC_LIMITS_MESSAGES_PER_MINUTE` | `limits.messages_per_minute` |
 | `CLIPSYNC_LIMITS_BYTES_PER_MINUTE` | `limits.bytes_per_minute` |
@@ -57,8 +67,9 @@ sudo systemctl enable --now clipsyncd
 curl --fail --insecure https://127.0.0.1:8765/readyz
 ```
 
-Crie `/etc/clipsync/relay.env` com as três variáveis `CLIPSYNC_RELAY_*`
-obrigatórias antes de iniciar o unit.
+Crie `/etc/clipsync/relay.tokens` com modo `0600` antes de iniciar o unit. O
+arquivo `/etc/clipsync/relay.env` deve conter apenas
+`CLIPSYNC_RELAY_TOKEN_FILE=/etc/clipsync/relay.tokens`.
 
 O unit não usa `clipsyncd service-install`: esse comando gera um unit de sessão
 do desktop e não é apropriado para um relay headless.
@@ -67,12 +78,13 @@ do desktop e não é apropriado para um relay headless.
 
 ```bash
 cp deploy/.env.example deploy/.env
+deploy/generate-relay-credentials.sh deploy/relay.tokens
 docker compose -f deploy/docker-compose.yml config
 docker compose -f deploy/docker-compose.yml up -d --build
-curl --fail http://127.0.0.1:8765/readyz
+curl --fail --cacert /var/lib/clipsync/tls-cert.pem https://127.0.0.1:8765/readyz
 ```
 
-O volume mantém `device_id`, certificado autoassinado e `trusted.toml`. A
+O volume mantém `device_id`, certificado PEM autoassinado e `trusted.toml`. A
 imagem roda sem backend de clipboard de desktop; por isso o modo headless
 continua disponível para encaminhar mensagens, mas não deve ser usado para
 sincronizar o clipboard local do host.
@@ -80,13 +92,24 @@ sincronizar o clipboard local do host.
 ## TLS no reverse proxy
 
 [`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile) é um exemplo mínimo de
-terminação TLS. O backend também permanece TLS; monte o certificado DER do relay
-em `/etc/caddy/tls/relay-cert.der` para validar o hop interno:
+terminação TLS. O backend também permanece TLS; monte o certificado PEM do relay
+em `/etc/caddy/tls/relay-cert.pem` para validar o hop interno. O SAN
+`clipsync-relay` e `tls_server_name` precisam permanecer alinhados:
 
 Não use `tls_insecure_skip_verify` nem altere o relay para `plaintext_legacy`.
 
 O WebSocket exige que o proxy encaminhe `Upgrade` e `Connection`; Caddy faz
 isso automaticamente. O healthcheck deve usar `/readyz`, não `/ws`.
+
+Quando o Caddy termina o TLS público, o pin publicado para clientes deve ser o
+fingerprint do certificado público do Caddy, não o certificado interno do
+relay. O trust pool acima protege somente o hop Caddy → relay.
+
+Execute o smoke test sem credenciais reais:
+
+```bash
+deploy/smoke-config.sh
+```
 
 ## Observabilidade e redaction
 

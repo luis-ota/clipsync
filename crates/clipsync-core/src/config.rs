@@ -229,6 +229,8 @@ pub struct SecurityConfig {
     pub tls_key_path: Option<String>,
     /// Se informado, impede iniciar com outro certificado.
     pub tls_fingerprint: Option<String>,
+    /// Nomes DNS incluidos no SAN da identidade gerada.
+    pub tls_server_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -248,6 +250,7 @@ impl Default for SecurityConfig {
             tls_cert_path: None,
             tls_key_path: None,
             tls_fingerprint: None,
+            tls_server_names: vec!["localhost".into()],
         }
     }
 }

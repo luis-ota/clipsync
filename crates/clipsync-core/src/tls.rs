@@ -34,13 +34,35 @@ impl Identity {
             .map(PathBuf::from)
             .unwrap_or_else(default_key_path);
         if !cert_path.exists() || !key_path.exists() {
-            let cert = generate_simple_self_signed(vec!["localhost".to_owned()])
+            if security.tls_server_names.is_empty() {
+                return Err(Error::Config(
+                    "identidade TLS exige pelo menos um nome SAN".into(),
+                ));
+            }
+            let cert = generate_simple_self_signed(security.tls_server_names.clone())
                 .map_err(|e| Error::Config(format!("falha gerando certificado TLS: {e}")))?;
-            write_private(&cert_path, cert.cert.der().as_ref())?;
-            write_private(&key_path, cert.key_pair.serialize_der().as_ref())?;
+            write_private(&cert_path, cert.cert.pem().as_bytes())?;
+            write_private(&key_path, cert.key_pair.serialize_pem().as_bytes())?;
         }
-        let cert_der = std::fs::read(&cert_path).map_err(Error::Io)?;
-        let key_der = std::fs::read(&key_path).map_err(Error::Io)?;
+        require_private_permissions(&cert_path)?;
+        require_private_permissions(&key_path)?;
+        let cert_pem = std::fs::read(&cert_path).map_err(Error::Io)?;
+        let key_pem = std::fs::read(&key_path).map_err(Error::Io)?;
+        let mut cert_reader = std::io::BufReader::new(cert_pem.as_slice());
+        let cert_der = rustls_pemfile::certs(&mut cert_reader)
+            .next()
+            .transpose()
+            .map_err(|e| Error::Config(format!("certificado TLS PEM invalido: {e}")))?
+            .ok_or_else(|| Error::Config("certificado TLS PEM vazio".into()))?
+            .to_vec();
+        let mut key_reader = std::io::BufReader::new(key_pem.as_slice());
+        let key_der = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+            .next()
+            .transpose()
+            .map_err(|e| Error::Config(format!("chave TLS PEM invalida: {e}")))?
+            .ok_or_else(|| Error::Config("chave TLS PKCS#8 PEM vazia".into()))?
+            .secret_pkcs8_der()
+            .to_vec();
         if cert_der.is_empty() || key_der.is_empty() {
             return Err(Error::Config("identidade TLS vazia".into()));
         }
@@ -98,6 +120,24 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(tmp, path).map_err(Error::Io)
 }
 
+fn require_private_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .map_err(Error::Io)?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode != 0o600 {
+            return Err(Error::Config(format!(
+                "arquivo de identidade {path:?} deve ter modo 0600 (atual {mode:o})"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn default_cert_path() -> PathBuf {
     crate::config::config_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -117,8 +157,8 @@ mod tests {
     fn identity_round_trip_and_pin_failure() {
         let dir = std::env::temp_dir().join(format!("clipsync-tls-{}", std::process::id()));
         let mut cfg = SecurityConfig {
-            tls_cert_path: Some(dir.join("cert").display().to_string()),
-            tls_key_path: Some(dir.join("key").display().to_string()),
+            tls_cert_path: Some(dir.join("cert.pem").display().to_string()),
+            tls_key_path: Some(dir.join("key.pem").display().to_string()),
             ..Default::default()
         };
         let first = Identity::load_or_generate(&cfg).unwrap();

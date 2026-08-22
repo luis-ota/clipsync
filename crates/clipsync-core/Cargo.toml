@@ -29,6 +29,7 @@ chrono.workspace = true
 directories.workspace = true
 toml.workspace = true
 rustls.workspace = true
+rustls-pemfile.workspace = true
 rcgen.workspace = true
 tokio-rustls.workspace = true
 hyper.workspace = true
