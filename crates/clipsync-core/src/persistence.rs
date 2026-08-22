@@ -25,10 +25,17 @@ pub(crate) fn atomic_write_with_mode(
         use std::os::unix::fs::PermissionsExt;
         temporary
             .file
+            .as_ref()
+            .expect("temporary file is open")
             .set_permissions(fs::Permissions::from_mode(mode))?;
     }
-    temporary.file.write_all(contents)?;
-    temporary.file.sync_all()?;
+    {
+        let file = temporary.file.as_mut().expect("temporary file is open");
+        file.write_all(contents)?;
+        file.sync_all()?;
+    }
+    // Windows refuses to rename a file while its handle is still open.
+    temporary.file.take();
     fs::rename(&temporary.path, path)?;
     temporary.committed = true;
 
@@ -37,7 +44,7 @@ pub(crate) fn atomic_write_with_mode(
 
 struct TemporaryPath {
     path: PathBuf,
-    file: fs::File,
+    file: Option<fs::File>,
     committed: bool,
 }
 
@@ -55,7 +62,7 @@ impl TemporaryPath {
                 Ok(file) => {
                     return Ok(Self {
                         path,
-                        file,
+                        file: Some(file),
                         committed: false,
                     });
                 }
