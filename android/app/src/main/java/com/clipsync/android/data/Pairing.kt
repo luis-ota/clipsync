@@ -39,12 +39,17 @@ private class SecureEndpointStore(private val preferences: android.content.Share
         val encoded = preferences.getString(ENDPOINTS_KEY, null) ?: return emptyList()
         decrypt(encoded).split('\n').filter { it.isNotBlank() }.mapNotNull { line ->
             val fields = line.split('|')
-            if (fields.size != 7) null else DiscoveredServer(fields[0], fields[1].ifBlank { null }, fields[0], fields[2], fields[3].toInt(), fields[4] == "tls", fields[5].ifBlank { null }, fields[6].ifBlank { null }, true)
+            if (fields.size !in 7..8) null else DiscoveredServer(
+                serviceName = fields[0], serverId = fields[1].ifBlank { null }, name = fields[0],
+                host = fields[2], port = fields[3].toInt(), tls = fields[4] == "tls",
+                tlsFingerprint = fields[5].ifBlank { null }, credentialRef = fields[6].ifBlank { null },
+                remote = true, deviceId = fields.getOrNull(7)?.ifBlank { null },
+            )
         }
     }.getOrDefault(emptyList())
 
     fun save(endpoints: List<DiscoveredServer>) {
-        val value = endpoints.joinToString("\n") { listOf(it.serviceName, it.serverId.orEmpty(), it.host, it.port.toString(), if (it.tls) "tls" else "plain", it.tlsFingerprint.orEmpty(), it.credentialRef.orEmpty()).joinToString("|") }
+        val value = endpoints.joinToString("\n") { listOf(it.serviceName, it.serverId.orEmpty(), it.host, it.port.toString(), if (it.tls) "tls" else "plain", it.tlsFingerprint.orEmpty(), it.credentialRef.orEmpty(), it.deviceId.orEmpty()).joinToString("|") }
         preferences.edit().putString(ENDPOINTS_KEY, encrypt(value)).apply()
     }
 

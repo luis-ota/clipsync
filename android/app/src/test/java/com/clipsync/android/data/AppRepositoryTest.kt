@@ -37,4 +37,15 @@ class AppRepositoryTest {
         AppRepository.setServers(DiscoverySnapshot(201, emptyList()))
         assertEquals("relay.example", AppRepository.targets.value?.host)
     }
+
+    @Test fun `endpoint relay preserva device id associado ao bearer`() {
+        val relay = DiscoveredServer(
+            "relay", null, "relay", "relay.example", 8765, true, "a".repeat(64),
+            "relay-token", true, "android-device",
+        )
+        AppRepository.setRemoteEndpoints(listOf(relay))
+        AppRepository.setServers(DiscoverySnapshot(300, emptyList()))
+        AppRepository.select("legacy:relay")
+        assertEquals("android-device", AppRepository.targets.value?.deviceId)
+    }
 }

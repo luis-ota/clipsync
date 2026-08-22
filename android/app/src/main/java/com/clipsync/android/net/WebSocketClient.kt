@@ -135,7 +135,7 @@ class WebSocketClient(
         val server = target ?: return
         val connectionGeneration = generation
         callbacks.onConnecting(connectionGeneration, null)
-        if (!server.tls || !isFingerprint(server.tlsFingerprint)) {
+        if (!server.tls || !isValidTlsFingerprint(server.tlsFingerprint)) {
             callbacks.onDisconnected(connectionGeneration, "servidor sem TLS/pinning; compatibilidade insegura desabilitada")
             return
         }
@@ -186,8 +186,6 @@ class WebSocketClient(
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
         .joinToString("") { "%02x".format(it) }
 
-    private fun isFingerprint(value: String?): Boolean = value?.matches(Regex("[0-9a-fA-F]{64}")) == true
-
     private fun fail(failedSocket: WebSocket, reason: String) {
         if (failedSocket !== socket || target == null || reconnectJob?.isActive == true) return
         socket = null
@@ -211,3 +209,6 @@ class WebSocketClient(
         socket = null
     }
 }
+
+internal fun isValidTlsFingerprint(value: String?): Boolean =
+    value?.matches(Regex("[0-9a-fA-F]{64}")) == true

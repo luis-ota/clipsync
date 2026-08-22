@@ -16,6 +16,7 @@ data class DiscoveredServer(
     val tlsFingerprint: String? = null,
     val credentialRef: String? = null,
     val remote: Boolean = false,
+    val deviceId: String? = null,
 ) {
     val id: String get() = serverId ?: "legacy:$serviceName"
 }

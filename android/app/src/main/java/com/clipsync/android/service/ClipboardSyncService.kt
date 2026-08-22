@@ -106,7 +106,7 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
         val generation = sessions.advance()
         selectedServer = server
         engine = null
-        currentDeviceId = server?.serverId?.let(deviceStore::deviceIdFor)
+        currentDeviceId = server?.deviceId ?: server?.serverId?.let(deviceStore::deviceIdFor)
         if (server == null) {
             webSocket.disconnect()
             setStatus(ConnectionStatus.DISCOVERING, "Servidor selecionado indisponivel nesta rede")
@@ -128,6 +128,11 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
             os_version = "Android ${Build.VERSION.RELEASE}",
             app_version = "clipsync-android ${BuildConfig.VERSION_NAME}",
         ))
+        if (selectedServer?.remote == true && currentDeviceId.isNullOrBlank()) {
+            setStatus(ConnectionStatus.ERROR, "device_id ausente para o bearer do relay")
+            webSocket.disconnect()
+            return
+        }
         send(engine!!.onOpen())
         if (selectedServer?.remote == true) {
             setStatus(ConnectionStatus.CONNECTED, "Conectado ao relay")
@@ -197,7 +202,14 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
         }
     }
     private fun sendClipboard(message: Message) {
-        if (AppRepository.state.value.status != ConnectionStatus.CONNECTED) return
+        val deviceId = currentDeviceId ?: return
+        val origin = when (message) {
+            is Message.ClipboardText -> message.origin
+            is Message.ClipboardImage -> message.origin
+            is Message.ClipboardHtml -> message.origin
+            else -> return
+        }
+        if (AppRepository.state.value.status != ConnectionStatus.CONNECTED || origin != deviceId) return
         val sendGeneration = sessions.current
         scope.launch {
             val payload = withContext(Dispatchers.Default) { ProtocolCodec.encode(message) }
