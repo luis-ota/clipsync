@@ -26,7 +26,10 @@ crates/clipsync-core/src/
 ├── lib.rs        Re-exports, constantes (PROTOCOL_VERSION, SERVICE_TYPE)
 ├── error.rs      Erros tipados (Error enum)
 ├── protocol.rs   Message, DeviceId, DeviceInfo, Capabilities, serde
-├── clipboard.rs  ClipboardManager (wl-copy/wl-paste/xclip subprocess)
+├── clipboard.rs  ClipboardManager e contratos comuns
+├── clipboard/
+│   ├── watch.rs  polling/eventos e debounce
+│   └── x11.rs    backend X11 via xclip com MIME explícito
 ├── config.rs     Config em TOML (server/discovery/clipboard/security)
 ├── discovery.rs  mDNS announce/browse (mdns-sd crate)
 ├── pairing.rs    PairingManager (PIN, trusted devices, tokens)
@@ -58,6 +61,12 @@ O daemon não reenvia o clipboard para quem originou a mensagem
 (`wl-copy`), e o watcher compara o sha256 do conteúdo lido com o
 último escrito por ele mesmo (`last_self_write`) para não re-emitir
 o que acabou de ser sincronizado de um peer.
+
+Wayland usa `wl-copy`/`wl-paste`. X11 consulta `TARGETS` com `xclip` e
+seleciona explicitamente o MIME (`image/png`, `image/jpeg` ou
+`UTF8_STRING` para texto), evitando que uma imagem seja lida como texto.
+O backend X11 requer `xclip` e uma sessão acessível via `DISPLAY`; os
+testes do backend são puros e não precisam de display.
 
 ### Segurança
 

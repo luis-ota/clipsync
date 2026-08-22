@@ -20,7 +20,8 @@ use base64::Engine;
 use tracing::warn;
 
 use crate::clipboard::{
-    ClipboardEvent, ClipboardManager, ClipboardSnapshot, WriteOrigin, MIME_HTML,
+    is_supported_image_mime, ClipboardEvent, ClipboardManager, ClipboardSnapshot, WriteOrigin,
+    MIME_HTML,
 };
 use crate::config::ClipboardConfig;
 use crate::protocol::{DeviceId, Message};
@@ -42,7 +43,10 @@ pub fn event_to_message(
     cfg: &ClipboardConfig,
     origin: &DeviceId,
 ) -> Option<Message> {
-    if snap.mime.starts_with("image/") && cfg.sync_images {
+    if is_supported_image_mime(&snap.mime)
+        && cfg.sync_images
+        && snap.bytes.len() <= cfg.max_image_bytes as usize
+    {
         use base64::Engine;
         Some(Message::ClipboardImage {
             mime: snap.mime.clone(),
@@ -61,7 +65,10 @@ pub fn event_to_message(
             alt,
             origin: origin.clone(),
         })
-    } else if snap.mime.starts_with("text/") && cfg.sync_text {
+    } else if snap.mime.starts_with("text/")
+        && cfg.sync_text
+        && snap.bytes.len() <= cfg.max_text_bytes as usize
+    {
         Some(Message::ClipboardText {
             mime: snap.mime.clone(),
             content: String::from_utf8_lossy(&snap.bytes).into_owned(),
@@ -115,6 +122,10 @@ pub fn message_to_event(msg: &Message) -> Option<ClipboardEvent> {
             ),
         ))),
         Message::ClipboardImage { data_b64, mime, .. } => {
+            if !is_supported_image_mime(mime) {
+                warn!(mime, "MIME de imagem não suportado; ignorando");
+                return None;
+            }
             let bytes = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
                 Ok(b) => b,
                 Err(e) => {
@@ -265,6 +276,20 @@ mod tests {
         let snap = ClipboardSnapshot::new_image(MIME_PNG, vec![0x89], "hash".into());
         let mut cfg = default_clipboard_cfg();
         cfg.sync_images = false;
+        assert!(event_to_message(&snap, &cfg, &origin()).is_none());
+    }
+
+    #[test]
+    fn unsupported_image_mime_is_not_published() {
+        let snap = ClipboardSnapshot::new_image("image/gif", vec![1], "hash".into());
+        assert!(event_to_message(&snap, &default_clipboard_cfg(), &origin()).is_none());
+    }
+
+    #[test]
+    fn oversized_image_is_not_published() {
+        let mut cfg = default_clipboard_cfg();
+        cfg.max_image_bytes = 1;
+        let snap = ClipboardSnapshot::new_image(MIME_PNG, vec![1, 2], "hash".into());
         assert!(event_to_message(&snap, &cfg, &origin()).is_none());
     }
 

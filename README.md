@@ -22,14 +22,14 @@ cirúrgico: **só clipboard, e bem feito**.
 └──────────────┘             └──────────────────┘
        │                              │
        ▼                              ▼
-   Texto / imagem                wl-copy / xclip
+   Texto / imagem                wl-copy / xclip (-t MIME)
 ```
 
 ## Status
 
 | Componente       | Estado      |
 |------------------|-------------|
-| `clipsyncd` (Rust daemon) | v0.1 — texto + imagem via `wl-copy`/`wl-paste` |
+| `clipsyncd` (Rust daemon) | v0.1 — texto + imagem via `wl-copy`/`wl-paste`/`xclip` |
 | Descoberta mDNS  | ✅ `_clipsync._tcp.local` |
 | Pareamento por PIN | ✅ 6 dígitos, mostrado no stdout/tray |
 | Múltiplos devices | ✅ |
@@ -116,6 +116,12 @@ Em X11, o daemon usa `xclip` automaticamente:
 ```bash
 sudo pacman -S xclip
 ```
+
+O backend X11 consulta os `TARGETS` do clipboard e lê/escreve `image/png` ou
+`image/jpeg` com `xclip -target <mime>`. O backend não converte imagens em
+texto. `DISPLAY` e uma sessão X11 acessível pelo usuário do daemon são
+requisitos em runtime; sem eles o daemon permanece em modo headless e o
+relay de rede continua disponível. O limite padrão de imagem é 25 MiB.
 
 ## Uso
 
