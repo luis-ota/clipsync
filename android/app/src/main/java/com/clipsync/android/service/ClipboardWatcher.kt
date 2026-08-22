@@ -3,7 +3,6 @@ package com.clipsync.android.service
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
 import androidx.core.content.FileProvider
@@ -21,9 +20,11 @@ import kotlinx.coroutines.withContext
 object ImageLimits {
     const val MAX_WEBSOCKET_MESSAGE_BYTES = 16 * 1024 * 1024
     private const val JSON_RESERVE_BYTES = 8 * 1024
-    const val MAX_IMAGE_BYTES = (MAX_WEBSOCKET_MESSAGE_BYTES - JSON_RESERVE_BYTES) / 4 * 3
+    const val MAX_IMAGE_BYTES = 12 * 1024 * 1024 - 6 * 1024
 
     fun acceptsRawSize(size: Int): Boolean = size in 0..MAX_IMAGE_BYTES
+    fun acceptsEncodedSize(size: Int): Boolean = size >= 0 &&
+        size + JSON_RESERVE_BYTES <= MAX_WEBSOCKET_MESSAGE_BYTES
 }
 
 class PendingEchoes(
@@ -97,11 +98,9 @@ class ClipboardWatcher(
             val message = withContext(Dispatchers.Default) {
                 val hash = sha256(bytes)
                 if (pendingEchoes.consume(hash)) return@withContext null
-                val bounds = BitmapFactory.Options().also { it.inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
                 Message.ClipboardImage(
                     mime, Base64.encodeToString(bytes, Base64.NO_WRAP),
-                    bounds.outWidth.takeIf { it > 0 }, bounds.outHeight.takeIf { it > 0 }, hash, origin,
+                    null, null, hash, origin,
                 )
             }
             message?.let(onMessage)
@@ -114,13 +113,16 @@ class ClipboardWatcher(
                 sha256(message.content.toByteArray()) == message.sha256
             }
             if (!valid) return@launch
-            pendingEchoes.add(message.sha256)
-            clipboard.setPrimaryClip(ClipData.newPlainText("ClipSync", message.content))
+            try {
+                clipboard.setPrimaryClip(ClipData.newPlainText("ClipSync", message.content))
+                pendingEchoes.add(message.sha256)
+            } catch (_: RuntimeException) { }
         }
     }
 
     fun writeImage(message: Message.ClipboardImage) {
         scope.launch {
+            if (!ImageLimits.acceptsEncodedSize(message.data_b64.length)) return@launch
             val bytes = withContext(Dispatchers.Default) {
                 try { Base64.decode(message.data_b64, Base64.DEFAULT) } catch (_: IllegalArgumentException) { null }
             } ?: return@launch
@@ -136,8 +138,10 @@ class ClipboardWatcher(
                 File(directory, "remote-${message.sha256}.$extension").also { it.writeBytes(bytes) }
             }
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-            pendingEchoes.add(message.sha256)
-            clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "ClipSync image", uri))
+            try {
+                clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "ClipSync image", uri))
+                pendingEchoes.add(message.sha256)
+            } catch (_: RuntimeException) { }
         }
     }
 

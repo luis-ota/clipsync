@@ -79,7 +79,7 @@ object AppRepository {
         routeMachine = RouteStateMachine(servers)
         mutableTargets.value = servers.firstOrNull { it.id == mutableState.value.selectedServerId }
     }
-    fun select(serverId: String) {
+    fun select(serverId: String?) {
         mutableState.update { it.copy(selectedServerId = serverId) }
         mutableTargets.value = mutableState.value.servers.firstOrNull { it.id == serverId }
     }
