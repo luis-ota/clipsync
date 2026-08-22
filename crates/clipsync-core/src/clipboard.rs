@@ -2,7 +2,8 @@
 //!
 //! Em Wayland, delega para `wl-copy`/`wl-paste` (ferramentas padrão
 //! de `wl-clipboard`, pacote Arch `wl-clipboard`). Em X11, usa
-//! `arboard` (que delega para `xclip`/`xsel`).
+//! `arboard` (que delega para `xclip`/`xsel`). Os comandos Wayland são
+//! opcionais em runtime; o núcleo continua compilável em macOS e Windows.
 //!
 //! O backend é escolhido automaticamente na construção:
 //!
