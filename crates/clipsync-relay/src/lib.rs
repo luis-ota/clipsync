@@ -60,8 +60,9 @@ pub trait TokenVerifier: Send + Sync + 'static {
 }
 
 /// Token provider intended for production deployments. The file format is one
-/// record per line: `token account device session group`. Tokens are hashed in
-/// memory and are never logged or retained in plaintext after startup.
+/// record per line: `token account device session group`. The session field is
+/// retained for file-format compatibility, but a fresh session is assigned for
+/// every WebSocket connection.
 #[derive(Debug, Clone)]
 pub struct FileTokenProvider {
     tokens: Arc<HashMap<[u8; 32], RelayIdentity>>,
@@ -293,18 +294,31 @@ impl RelayState {
 
 impl RelayState {
     pub async fn attach(&self, identity: RelayIdentity, tx: mpsc::Sender<Arc<Message>>) -> String {
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = SessionId::new();
+        let identity = RelayIdentity {
+            session_id: session_id.clone(),
+            ..identity
+        };
         let mut sessions = self.sessions.write().await;
-        sessions.retain(|_, old| old.identity != identity);
+        let replaced: Vec<_> = sessions
+            .iter()
+            .filter(|(_, old)| same_device(&old.identity, &identity))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for old_id in replaced {
+            if let Some(old) = sessions.remove(&old_id) {
+                self.replay.lock().await.forget(&old.identity.session_id);
+            }
+        }
         sessions.insert(
-            session_id.clone(),
+            session_id.to_string(),
             Session {
                 identity,
-                session_id: session_id.clone(),
+                session_id: session_id.to_string(),
                 tx,
             },
         );
-        session_id
+        session_id.to_string()
     }
 
     pub async fn detach(&self, session_id: &str) {
@@ -322,6 +336,18 @@ impl RelayState {
         mut envelope: RelayEnvelope,
         authenticated_source: &DeviceId,
     ) -> Result<usize, String> {
+        let active = self
+            .sessions
+            .read()
+            .await
+            .get(envelope.session_id.as_str())
+            .is_some_and(|session| {
+                session.identity.device_id == *authenticated_source
+                    && session.identity.session_id == envelope.session_id
+            });
+        if !active {
+            return Err("authorization rejected: inactive session".into());
+        }
         envelope
             .authorize(
                 authenticated_source,
@@ -381,7 +407,12 @@ impl RelayState {
         if !saturated.is_empty() {
             let mut map = self.sessions.write().await;
             for id in saturated {
-                map.remove(&id);
+                if let Some(session) = map.remove(&id) {
+                    self.replay
+                        .lock()
+                        .await
+                        .forget(&session.identity.session_id);
+                }
             }
         }
         delivered
@@ -394,6 +425,12 @@ impl RelayState {
     pub async fn is_empty(&self) -> bool {
         self.sessions.read().await.is_empty()
     }
+}
+
+fn same_device(left: &RelayIdentity, right: &RelayIdentity) -> bool {
+    left.account_id == right.account_id
+        && left.device_id == right.device_id
+        && left.group_id == right.group_id
 }
 
 pub struct RelayServer {
@@ -621,19 +658,20 @@ where
         _ = shutdown.cancelled() => return Ok(None),
         first = tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.next()) => first.map_err(|_| ())?,
     };
-    let session_id = match first {
+    match first {
         Some(frame) => handle_hello(frame.map_err(|_| ())?, identity).await?,
         None => return Ok(None),
-    };
-    let attached = state.attach(identity.clone(), own_tx.clone()).await;
+    }
+    let attached = SessionId::from_string(state.attach(identity.clone(), own_tx.clone()).await)
+        .expect("attach always creates a session id");
     info!(%peer, device = %identity.device_id, "relay session connected");
     loop {
         let frame = tokio::select! {
-            _ = shutdown.cancelled() => return Ok(Some(attached)),
+            _ = shutdown.cancelled() => return Ok(Some(attached.to_string())),
             frame = stream.next() => frame,
         };
         let Some(frame) = frame else {
-            return Ok(Some(attached));
+            return Ok(Some(attached.to_string()));
         };
         if handle_frame(
             frame.map_err(|_| ())?,
@@ -641,18 +679,18 @@ where
             identity,
             own_tx,
             sequence,
-            &session_id,
+            &attached,
             peer.ip(),
         )
         .await
         .is_err()
         {
-            return Ok(Some(attached));
+            return Ok(Some(attached.to_string()));
         }
     }
 }
 
-async fn handle_hello(frame: WsMessage, identity: &RelayIdentity) -> Result<SessionId, ()> {
+async fn handle_hello(frame: WsMessage, identity: &RelayIdentity) -> Result<(), ()> {
     let WsMessage::Text(text) = frame else {
         return Err(());
     };
@@ -661,7 +699,7 @@ async fn handle_hello(frame: WsMessage, identity: &RelayIdentity) -> Result<Sess
             if device.id.is_some_and(|id| id != identity.device_id) {
                 return Err(());
             }
-            Ok(identity.session_id.clone())
+            Ok(())
         }
         _ => Err(()),
     }
@@ -826,6 +864,57 @@ mod tests {
         assert_eq!(state.len().await, 1);
         state.detach(&new_id).await;
         assert_eq!(state.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn replay_is_rejected_after_reconnect_but_new_session_starts_fresh() {
+        let source = identity("account", "source");
+        let target = identity("account", "target");
+        let mut groups = GroupAuthorizer::default();
+        groups.add_member(source.group_id.clone(), source.device_id.clone());
+        groups.add_member(target.group_id.clone(), target.device_id.clone());
+        let state = RelayState::with_groups_and_limits(
+            groups,
+            clipsync_core::config::LimitsConfig::default(),
+        );
+        let (target_tx, mut target_rx) = mpsc::channel(4);
+        state.attach(target, target_tx).await;
+        let (old_tx, _) = mpsc::channel(4);
+        let old_session = state.attach(source.clone(), old_tx).await;
+        let old_session = SessionId::from_string(old_session).unwrap();
+        let envelope = |session_id: SessionId, sequence| RelayEnvelope {
+            session_id,
+            source: source.device_id.clone(),
+            destination: None,
+            group: source.group_id.clone(),
+            sequence,
+            payload: Message::Ping {
+                ts: sequence as i64,
+            },
+        };
+
+        assert_eq!(
+            state
+                .route_envelope(envelope(old_session.clone(), 1), &source.device_id)
+                .await,
+            Ok(1)
+        );
+        target_rx.recv().await.expect("first message delivered");
+
+        let (new_tx, _) = mpsc::channel(4);
+        let new_session =
+            SessionId::from_string(state.attach(source.clone(), new_tx).await).unwrap();
+        assert_ne!(old_session, new_session);
+        assert!(state
+            .route_envelope(envelope(old_session, 2), &source.device_id)
+            .await
+            .is_err());
+        assert_eq!(
+            state
+                .route_envelope(envelope(new_session, 1), &source.device_id)
+                .await,
+            Ok(1)
+        );
     }
 
     #[tokio::test]
