@@ -55,6 +55,7 @@ pub struct Config {
     pub device_id: Option<DeviceId>,
     pub discovery: DiscoveryConfig,
     pub clipboard: ClipboardConfig,
+    pub limits: LimitsConfig,
     pub security: SecurityConfig,
     /// Destinos de clientes remotos (LAN ou relay compatível com `/ws`).
     pub endpoints: Vec<EndpointConfig>,
@@ -68,6 +69,7 @@ impl Default for Config {
             device_id: None,
             discovery: DiscoveryConfig::default(),
             clipboard: ClipboardConfig::default(),
+            limits: LimitsConfig::default(),
             security: SecurityConfig::default(),
             endpoints: Vec::new(),
         }
@@ -190,6 +192,25 @@ impl Default for ClipboardConfig {
     }
 }
 
+/// Limites de admissao por endereco de origem. Zero desabilita o limite.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LimitsConfig {
+    pub max_connections: usize,
+    pub messages_per_minute: u32,
+    pub bytes_per_minute: u64,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 256,
+            messages_per_minute: 120,
+            bytes_per_minute: 64 * 1024 * 1024,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SecurityConfig {
@@ -267,6 +288,17 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Carrega o arquivo e aplica apenas variaveis operacionais documentadas.
+    /// O arquivo continua sendo a fonte de defaults, o que torna o ambiente
+    /// adequado para containers sem aceitar TOML arbitrario via env.
+    pub fn load_or_default_env(path: Option<&std::path::Path>) -> Result<Self> {
+        let env_path = std::env::var_os("CLIPSYNC_CONFIG");
+        let path = path.or_else(|| env_path.as_deref().map(std::path::Path::new));
+        let mut cfg = Self::load_or_default(path)?;
+        apply_env(&mut cfg)?;
+        Ok(cfg)
+    }
+
     /// Salva a config em disco.
     pub fn save(&self, path: &std::path::Path) -> Result<()> {
         if let Some(parent) = path.parent() {
@@ -279,6 +311,54 @@ impl Config {
             .map_err(|e| Error::Config(format!("falha salvando {path:?}: {e}")))?;
         Ok(())
     }
+}
+
+fn apply_env(cfg: &mut Config) -> Result<()> {
+    if let Some(value) = std::env::var_os("CLIPSYNC_BIND") {
+        cfg.bind = value
+            .into_string()
+            .map_err(|_| Error::Config("CLIPSYNC_BIND nao e UTF-8".into()))?;
+    }
+    if let Some(value) = std::env::var_os("CLIPSYNC_NAME") {
+        cfg.name = value
+            .into_string()
+            .map_err(|_| Error::Config("CLIPSYNC_NAME nao e UTF-8".into()))?;
+    }
+    if let Some(value) = std::env::var_os("CLIPSYNC_DISCOVERY_ENABLE_MDNS") {
+        cfg.discovery.enable_mdns = parse_env(&value, "CLIPSYNC_DISCOVERY_ENABLE_MDNS")?;
+    }
+    if let Some(value) = std::env::var_os("CLIPSYNC_SECURITY_TRANSPORT") {
+        cfg.security.transport = match value.to_str() {
+            Some("tls") => crate::config::Transport::Tls,
+            Some("plaintext_legacy") => crate::config::Transport::PlaintextLegacy,
+            _ => {
+                return Err(Error::Config(
+                    "CLIPSYNC_SECURITY_TRANSPORT deve ser tls ou plaintext_legacy".into(),
+                ))
+            }
+        };
+    }
+    if let Some(value) = std::env::var_os("CLIPSYNC_SECURITY_LOCAL_ONLY") {
+        cfg.security.local_only = parse_env(&value, "CLIPSYNC_SECURITY_LOCAL_ONLY")?;
+    }
+    if let Some(value) = std::env::var_os("CLIPSYNC_LIMITS_MAX_CONNECTIONS") {
+        cfg.limits.max_connections = parse_env(&value, "CLIPSYNC_LIMITS_MAX_CONNECTIONS")?;
+    }
+    if let Some(value) = std::env::var_os("CLIPSYNC_LIMITS_MESSAGES_PER_MINUTE") {
+        cfg.limits.messages_per_minute = parse_env(&value, "CLIPSYNC_LIMITS_MESSAGES_PER_MINUTE")?;
+    }
+    if let Some(value) = std::env::var_os("CLIPSYNC_LIMITS_BYTES_PER_MINUTE") {
+        cfg.limits.bytes_per_minute = parse_env(&value, "CLIPSYNC_LIMITS_BYTES_PER_MINUTE")?;
+    }
+    Ok(())
+}
+
+fn parse_env<T: std::str::FromStr>(value: &std::ffi::OsStr, name: &str) -> Result<T> {
+    value
+        .to_str()
+        .ok_or_else(|| Error::Config(format!("{name} nao e UTF-8")))?
+        .parse()
+        .map_err(|_| Error::Config(format!("{name} tem valor invalido")))
 }
 
 #[cfg(test)]

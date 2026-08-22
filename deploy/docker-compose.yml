@@ -1,0 +1,36 @@
+services:
+  clipsyncd:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: clipsyncd:local
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CLIPSYNC_CONFIG: /etc/clipsync/config.toml
+      CLIPSYNC_BIND: ${CLIPSYNC_BIND:-0.0.0.0:8765}
+      CLIPSYNC_NAME: ${CLIPSYNC_NAME:-clipsync-relay}
+      CLIPSYNC_SECURITY_TRANSPORT: ${CLIPSYNC_SECURITY_TRANSPORT:-tls}
+      CLIPSYNC_LIMITS_MAX_CONNECTIONS: ${CLIPSYNC_LIMITS_MAX_CONNECTIONS:-256}
+      CLIPSYNC_LIMITS_MESSAGES_PER_MINUTE: ${CLIPSYNC_LIMITS_MESSAGES_PER_MINUTE:-120}
+      CLIPSYNC_LIMITS_BYTES_PER_MINUTE: ${CLIPSYNC_LIMITS_BYTES_PER_MINUTE:-67108864}
+    volumes:
+      - clipsync-state:/var/lib/clipsync
+      - ./config/relay.toml:/etc/clipsync/config.toml:ro
+    ports:
+      - "${CLIPSYNC_PORT:-8765}:8765"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8765/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  clipsync-state:

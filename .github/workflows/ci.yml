@@ -49,6 +49,12 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --no-fail-fast
 
+      - name: Validate deployment configuration
+        run: cargo run -p clipsyncd -- validate-config --config deploy/config/relay.toml
+
+      - name: Validate compose file
+        run: docker compose -f deploy/docker-compose.yml config --quiet
+
   audit:
     name: audit
     runs-on: ubuntu-latest

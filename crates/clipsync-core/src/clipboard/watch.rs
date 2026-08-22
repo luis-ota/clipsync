@@ -55,7 +55,7 @@ pub(super) async fn read_for_emit(me: &mut ClipboardManager) -> Result<Option<Cl
     // escrever (porque veio de um peer remoto), absorvemos e não
     // emitimos.
     if me.last_self_write.matches(&snap.sha256) {
-        debug!(sha256 = %snap.sha256, "anti-echo: ignorando escrita própria");
+        debug!("anti-echo: ignorando escrita própria");
         me.last_self_write.clear();
         me.last_seen = Some(snap.sha256);
         return Ok(None);

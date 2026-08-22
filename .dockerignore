@@ -1,0 +1,6 @@
+.git
+target
+android/.gradle
+android/build
+deploy/.env
+*.log
