@@ -42,6 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -52,6 +53,7 @@ import com.clipsync.android.data.DiscoveredServer
 import com.clipsync.android.data.DeviceStore
 import java.net.URI
 import com.clipsync.android.service.ClipboardSyncService
+import com.clipsync.android.net.isValidTlsFingerprint
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -110,23 +112,25 @@ private fun RemoteEndpointForm() {
     var url by remember { mutableStateOf("") }
     var fingerprint by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
+    var deviceId by remember { mutableStateOf("") }
     Column {
         Text("Adicionar relay ou endpoint remoto", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Nome") }, singleLine = true)
         OutlinedTextField(url, { url = it }, Modifier.fillMaxWidth(), label = { Text("URL wss://host:porta/ws") }, singleLine = true)
-        OutlinedTextField(fingerprint, { fingerprint = it.filter(Char::isLetterOrDigit).lowercase().take(64) }, Modifier.fillMaxWidth(), label = { Text("Fingerprint SHA-256 (64 hex)") }, singleLine = true)
-        OutlinedTextField(token, { token = it }, Modifier.fillMaxWidth(), label = { Text("Bearer token do relay") }, singleLine = true)
+        OutlinedTextField(fingerprint, { fingerprint = it.filter { char -> char in "0123456789abcdefABCDEF" }.lowercase().take(64) }, Modifier.fillMaxWidth(), label = { Text("Fingerprint SHA-256 (64 hex)") }, singleLine = true)
+        OutlinedTextField(deviceId, { deviceId = it.trim() }, Modifier.fillMaxWidth(), label = { Text("device_id associado ao bearer") }, singleLine = true)
+        OutlinedTextField(token, { token = it }, Modifier.fillMaxWidth(), label = { Text("Bearer token do relay") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
         Button(onClick = {
             val parsed = runCatching { URI(url) }.getOrNull()
-            if (parsed?.scheme == "wss" && parsed.path == "/ws" && parsed.host != null && parsed.port > 0 && fingerprint.length == 64) {
+            if (parsed?.scheme == "wss" && parsed.path == "/ws" && parsed.host != null && parsed.port > 0 && isValidTlsFingerprint(fingerprint) && deviceId.isNotBlank()) {
                 val reference = "remote:$name"
-                val endpoint = DiscoveredServer(reference, null, name, parsed.host, parsed.port, true, fingerprint, reference, true)
+                val endpoint = DiscoveredServer(reference, null, name, parsed.host, parsed.port, true, fingerprint, reference, true, deviceId)
                 AppRepository.addRemoteEndpoint(endpoint)
                 RemoteEndpointStoreHolder.save(endpoint)
                 RemoteEndpointStoreHolder.saveToken(reference, token)
-                name = ""; url = ""; fingerprint = ""
+                name = ""; url = ""; fingerprint = ""; deviceId = ""; token = ""
             }
-        }, enabled = name.isNotBlank() && url.isNotBlank() && fingerprint.length == 64 && token.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Salvar endpoint") }
+        }, enabled = name.isNotBlank() && url.isNotBlank() && isValidTlsFingerprint(fingerprint) && deviceId.isNotBlank() && token.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Salvar endpoint") }
     }
 }
 
