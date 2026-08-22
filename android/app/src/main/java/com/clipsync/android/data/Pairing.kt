@@ -9,6 +9,29 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import java.net.URI
+import java.net.URLDecoder
+
+data class PairingDeepLink(val serverId: String?, val pin: String?)
+
+object PairingDeepLinks {
+    fun parse(uri: android.net.Uri): PairingDeepLink? {
+        return parse(uri.toString())
+    }
+
+    internal fun parse(raw: String): PairingDeepLink? {
+        val uri = runCatching { URI(raw) }.getOrNull() ?: return null
+        if (uri.scheme != "clipsync" || uri.host != "pair") return null
+        val query = uri.rawQuery.orEmpty().split('&').mapNotNull { part ->
+            val fields = part.split('=', limit = 2)
+            if (fields.size == 2) URLDecoder.decode(fields[0], "UTF-8") to URLDecoder.decode(fields[1], "UTF-8") else null
+        }.toMap()
+        val serverId = query["server_id"]?.trim()?.takeIf { it.isNotEmpty() }
+        val pin = query["pin"]?.takeIf { it.matches(Regex("[0-9]{6}")) }
+        if (serverId == null && pin == null) return null
+        return PairingDeepLink(serverId, pin)
+    }
+}
 
 class DeviceStore(context: Context) {
     private val preferences = context.getSharedPreferences("clipsync", Context.MODE_PRIVATE)

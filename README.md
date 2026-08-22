@@ -278,7 +278,7 @@ Mensagens v0.1:
 - [ ] v0.2 — criptografia E2E (Noise / AES-GCM), HTML rich text
 - [ ] v0.3 — transferência de arquivos, múltiplos PCs
 - [x] v0.4 — app Android (Kotlin + Compose), foreground service
-- [ ] v0.5 — IME customizado para captura em background
+- [x] v0.5 — IME para insercao explicita do ultimo clipboard remoto
 
 ## Contribuindo
 

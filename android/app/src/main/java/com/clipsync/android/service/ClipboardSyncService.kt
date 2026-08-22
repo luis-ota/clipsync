@@ -33,6 +33,13 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** Process-local handoff for explicit notification/IME actions; never persisted. */
+object RemoteClipboardBuffer {
+    @Volatile private var message: Message? = null
+    fun set(value: Message) { message = value }
+    fun get(): Message? = message
+}
+
 internal class SessionGeneration {
     private var value = 0L
     val current: Long get() = synchronized(this) { value }
@@ -92,7 +99,14 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_COPY_FROM_PC -> copyLatestRemote()
+            ACTION_SEND_CLIPBOARD -> clipboard.sendCurrentClipboard()
+            ACTION_RECONNECT -> reconnect()
+        }
+        return START_STICKY
+    }
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onTimeout(startId: Int, fgsType: Int) { stopSelf(startId) }
     override fun onDestroy() {
@@ -187,9 +201,19 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
             }
             is ProtocolAction.PairingFailed -> setStatus(ConnectionStatus.ERROR, action.reason)
             is ProtocolAction.Clipboard -> when (val message = action.message) {
-                is Message.ClipboardText -> clipboard.writeText(message)
-                is Message.ClipboardImage -> clipboard.writeImage(message)
+                is Message.ClipboardText -> {
+                    RemoteClipboardBuffer.set(message)
+                    AppRepository.recordRemote(message)
+                    clipboard.writeText(message)
+                }
+                is Message.ClipboardImage -> {
+                    RemoteClipboardBuffer.set(message)
+                    AppRepository.recordRemote(message)
+                    clipboard.writeImage(message)
+                }
                 is Message.ClipboardHtml -> {
+                    RemoteClipboardBuffer.set(message)
+                    AppRepository.recordRemote(message)
                     val text = message.alt ?: message.html
                     clipboard.writeText(Message.ClipboardText(
                         "text/plain;charset=utf-8", text, message.origin, ClipboardWatcher.sha256(text.toByteArray()),
@@ -222,6 +246,26 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
             }
         }
     }
+    private fun copyLatestRemote() {
+        when (val message = RemoteClipboardBuffer.get()) {
+            is Message.ClipboardText -> clipboard.writeText(message)
+            is Message.ClipboardImage -> clipboard.writeImage(message)
+            is Message.ClipboardHtml -> clipboard.writeText(Message.ClipboardText(
+                "text/plain;charset=utf-8", message.alt ?: message.html, message.origin,
+                ClipboardWatcher.sha256((message.alt ?: message.html).toByteArray()),
+            ))
+            null -> setStatus(AppRepository.state.value.status, "Nenhum item remoto disponivel")
+            else -> Unit
+        }
+    }
+    private fun reconnect() {
+        val target = AppRepository.targets.value
+        if (target == null) {
+            setStatus(ConnectionStatus.DISCOVERING, "Aguardando servidor para reconectar")
+        } else {
+            connect(target)
+        }
+    }
     private fun send(message: Message) { webSocket.send(ProtocolCodec.encode(message), sessions.current) }
     override fun onSendFailed(generation: Long) {
         if (sessions.accepts(generation)) {
@@ -238,10 +282,17 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
         .setContentText(text)
         .setOngoing(true)
         .setOnlyAlertOnce(true)
+        .addAction(NotificationCompat.Action.Builder(0, getString(R.string.notification_copy_from_pc), command(ACTION_COPY_FROM_PC)).build())
+        .addAction(NotificationCompat.Action.Builder(0, getString(R.string.notification_send_clipboard), command(ACTION_SEND_CLIPBOARD)).build())
+        .addAction(NotificationCompat.Action.Builder(0, getString(R.string.notification_reconnect), command(ACTION_RECONNECT)).build())
         .setContentIntent(PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )).build()
+    private fun command(action: String): PendingIntent = PendingIntent.getService(
+        this, action.hashCode(), Intent(this, ClipboardSyncService::class.java).setAction(action),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
     private fun createNotificationChannel() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, getString(R.string.notification_channel_name), NotificationManager.IMPORTANCE_LOW)
@@ -250,5 +301,8 @@ class ClipboardSyncService : Service(), WebSocketClient.Callbacks {
     private companion object {
         const val CHANNEL_ID = "clipboard_sync"
         const val NOTIFICATION_ID = 1
+        const val ACTION_COPY_FROM_PC = "com.clipsync.android.COPY_FROM_PC"
+        const val ACTION_SEND_CLIPBOARD = "com.clipsync.android.SEND_CLIPBOARD"
+        const val ACTION_RECONNECT = "com.clipsync.android.RECONNECT"
     }
 }

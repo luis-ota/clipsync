@@ -51,6 +51,7 @@ import com.clipsync.android.data.AppUiState
 import com.clipsync.android.data.ConnectionStatus
 import com.clipsync.android.data.DiscoveredServer
 import com.clipsync.android.data.DeviceStore
+import com.clipsync.android.data.PairingDeepLinks
 import java.net.URI
 import com.clipsync.android.service.ClipboardSyncService
 import com.clipsync.android.net.isValidTlsFingerprint
@@ -59,8 +60,20 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         RemoteEndpointStoreHolder.initialize(this)
+        handlePairingIntent(intent)
         ContextCompat.startForegroundService(this, Intent(this, ClipboardSyncService::class.java))
         setContent { ClipSyncApp() }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handlePairingIntent(intent)
+    }
+
+    private fun handlePairingIntent(intent: Intent?) {
+        val link = intent?.data?.let(PairingDeepLinks::parse) ?: return
+        link.serverId?.let(AppRepository::select)
+        link.pin?.let(AppRepository::submitPin)
     }
 }
 
@@ -81,6 +94,10 @@ private fun ClipSyncApp() {
                 Text("Clipboard na sua rede", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(20.dp))
                 StatusCard(state)
+                state.lastRemoteItem?.let { item ->
+                    Spacer(Modifier.height(8.dp))
+                    Text("Ultimo item do PC: ${item.preview}", style = MaterialTheme.typography.bodySmall)
+                }
                 if (state.status == ConnectionStatus.WAITING_FOR_PIN) PinForm()
                 RemoteEndpointForm()
                 Spacer(Modifier.height(24.dp))
