@@ -12,6 +12,7 @@
 //!    peers — útil para testes e CI sem display).
 
 mod watch;
+mod x11;
 
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -34,6 +35,11 @@ pub const MIME_TEXT_PLAIN: &str = "text/plain";
 pub const MIME_PNG: &str = "image/png";
 pub const MIME_JPEG: &str = "image/jpeg";
 pub const MIME_HTML: &str = "text/html";
+
+/// MIME de imagem aceitos pelo protocolo e pelos backends locais.
+pub fn is_supported_image_mime(mime: &str) -> bool {
+    matches!(mime, MIME_PNG | MIME_JPEG)
+}
 
 /// Conteúdo rich text (HTML) associado a um snapshot.
 #[derive(Debug, Clone)]
@@ -325,25 +331,7 @@ impl ClipboardManager {
                 }
                 Ok(None)
             }
-            BackendKind::X11 => {
-                if preferred_mimes.iter().any(|m| m.starts_with("text/")) {
-                    let out = Command::new("xclip")
-                        .arg("-selection")
-                        .arg("clipboard")
-                        .arg("-o")
-                        .output();
-                    match out {
-                        Ok(o) if o.status.success() && !o.stdout.is_empty() => {
-                            let snap = Self::snapshot(MIME_TEXT, o.stdout);
-                            debug!("x11: leitura de HTML não suportada");
-                            return Ok(Some(snap));
-                        }
-                        Ok(_) => {}
-                        Err(e) => return Err(Error::Clipboard(e.to_string())),
-                    }
-                }
-                Ok(None)
-            }
+            BackendKind::X11 => x11::read(preferred_mimes),
             BackendKind::Headless => Ok(None),
         }
     }
@@ -400,6 +388,11 @@ impl ClipboardManager {
         if !mime.starts_with("image/") {
             return Err(Error::Protocol(format!("mime de imagem inválido: {mime}")));
         }
+        if !is_supported_image_mime(mime) {
+            return Err(Error::Protocol(format!(
+                "mime de imagem não suportado: {mime}"
+            )));
+        }
         self.write(mime, bytes, origin).await
     }
 
@@ -437,9 +430,7 @@ impl ClipboardManager {
                 run_backend_tool(&mut cmd, bytes, "wl-copy")?;
             }
             BackendKind::X11 => {
-                let mut cmd = Command::new("xclip");
-                cmd.args(["-selection", "clipboard", "-i"]);
-                run_backend_tool(&mut cmd, bytes, "xclip")?;
+                x11::write(mime, bytes)?;
             }
             BackendKind::Headless => {
                 debug!("headless: ignorando write de {} bytes", bytes.len());

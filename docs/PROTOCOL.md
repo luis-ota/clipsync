@@ -149,6 +149,12 @@ reserva codificada, mantendo cada mensagem abaixo da fila de 16 MiB do OkHttp.
 > Planejado v0.3: transferência via frames binários WebSocket com
 > hash + id de transferência, evitando base64 para arquivos grandes.
 
+No backend Linux X11, somente `image/png` e `image/jpeg` são aceitos. O daemon
+consulta os alvos anunciados pelo clipboard antes de ler e usa `xclip` com o
+MIME explícito ao escrever. `image/gif` e outros MIME de imagem não são
+sincronizados. O limite também é aplicado antes do broadcast local, além da
+validação das mensagens recebidas.
+
 ### HTML (rich text, v0.2)
 
 ```json
